@@ -1,6 +1,6 @@
 [package]
 name = "dutad"
-version = "0.0.1"
+version = "0.0.1-beta"
 edition = "2021"
 license = "MIT"
 authors = ["dutago"]

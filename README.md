@@ -4,6 +4,8 @@
 
 It contains the chain-critical parts of the project: consensus rules, block and transaction validation, storage, daemon RPC, P2P networking, and the built-in solo mining flow.
 
+Current release line: `0.0.1-beta`
+
 Website: https://dutago.xyz
 
 ## Repository scope
