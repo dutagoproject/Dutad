@@ -1,0 +1,9 @@
+**/target/
+dist/
+docs/_site/
+*.pdb
+*.exe
+*.dll
+*.log
+*.pid
+OUT WORKSPACE/

@@ -1,0 +1,7 @@
+* text=auto
+*.ps1 linguist-detectable=false
+*.psm1 linguist-detectable=false
+*.psd1 linguist-detectable=false
+**/target/** linguist-generated=true
+**/dist/** linguist-generated=true
+**/build/** linguist-generated=true

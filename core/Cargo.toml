@@ -1,0 +1,16 @@
+[package]
+name = "duta-core"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+authors = ["dutago"]
+description = "DUTA core primitives (consensus, netparams, address, dutahash)."
+homepage = "https://dutago.xyz"
+readme = "../README.md"
+keywords = ["duta", "pow", "blockchain", "consensus", "hash"]
+categories = ["cryptography::cryptocurrencies"]
+
+[dependencies]
+sha3 = "0.10"
+hex = "0.4"
+thiserror = "1"
