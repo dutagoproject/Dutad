@@ -339,7 +339,7 @@ fn sync_progress(data_dir: &str) -> f64 {
 fn rpc_info_json() -> serde_json::Value {
     json!({
         "active_commands": [{"method": "rpc", "duration": uptime_secs(), "user": "local"}],
-        "logpath": "debug.log"
+        "logpath": "dutad.stdout.log"
     })
 }
 
@@ -358,6 +358,9 @@ fn parse_submit_params(
         if obj.get("height").is_some() && obj.get("hash32").is_some() {
             let b: crate::ChainBlock = serde_json::from_value(v.clone())
                 .map_err(|e| format!("block_decode_failed: {}", e))?;
+            if b.height > 0 && b.txs.is_none() {
+                return Err("submitblock_missing_txs".to_string());
+            }
             return Ok(Ok(b));
         }
         if let Some(work_id) = obj
@@ -718,13 +721,17 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
                 "getinfo",
                 "getnetworkinfo",
                 "getpeerinfo",
+                "listbanned",
                 "getconnectioncount",
                 "ping",
                 "uptime",
                 "validateaddress(address)",
                 "getrpcinfo",
                 "addpeer(peer)",
-                "addnode(peer)"
+                "addnode(peer)",
+                "banpeer(ip, reason=\"manual_operator_ban\")",
+                "unbanpeer(ip)",
+                "setban(ip, command=\"add\"|\"remove\", reason=\"manual_operator_ban\")"
             ]);
             Ok(ok(id, methods))
         }
@@ -1253,13 +1260,65 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
             Ok(ok(id, json!(out)))
         }
 
+        "listbanned" => Ok(ok(id, crate::p2p::list_banned_json())),
+
+        "banpeer" => {
+            let ip = params.first().and_then(as_str).unwrap_or("").trim();
+            if ip.is_empty() {
+                return Ok(err(id, -32602, "missing_ip"));
+            }
+            let reason = params.get(1).and_then(as_str);
+            match crate::p2p::ban_peer_manual(ip, reason) {
+                Ok(v) => Ok(ok(id, v)),
+                Err(e) => Ok(err(id, -32602, &e)),
+            }
+        }
+
+        "unbanpeer" => {
+            let ip = params.first().and_then(as_str).unwrap_or("").trim();
+            if ip.is_empty() {
+                return Ok(err(id, -32602, "missing_ip"));
+            }
+            match crate::p2p::unban_peer_manual(ip) {
+                Ok(v) => Ok(ok(id, v)),
+                Err(e) => Ok(err(id, -32602, &e)),
+            }
+        }
+
+        "setban" => {
+            let ip = params.first().and_then(as_str).unwrap_or("").trim();
+            if ip.is_empty() {
+                return Ok(err(id, -32602, "missing_ip"));
+            }
+            let cmd = params
+                .get(1)
+                .and_then(as_str)
+                .map(|s| s.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "add".to_string());
+            let reason = params.get(2).and_then(as_str);
+            match cmd.as_str() {
+                "add" | "ban" => match crate::p2p::ban_peer_manual(ip, reason) {
+                    Ok(v) => Ok(ok(id, v)),
+                    Err(e) => Ok(err(id, -32602, &e)),
+                },
+                "remove" | "unban" => match crate::p2p::unban_peer_manual(ip) {
+                    Ok(v) => Ok(ok(id, v)),
+                    Err(e) => Ok(err(id, -32602, &e)),
+                },
+                _ => Ok(invalid_params(
+                    id,
+                    "setban(ip, command=\"add\"|\"remove\", reason=\"manual_operator_ban\")",
+                )),
+            }
+        }
+
         _ => Ok(err(id, -32601, "method_not_found")),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{getblocktemplate_json, handle_rpc};
+    use super::{getblocktemplate_json, handle_rpc, parse_submit_params};
     use serde_json::json;
 
     #[test]
@@ -1365,4 +1424,80 @@ mod tests {
             duta_core::netparams::Network::Testnet
         );
     }
+
+    #[test]
+    fn submitblock_object_requires_txs_for_non_genesis() {
+        let err = parse_submit_params(
+            "C:/dutaproject/testnet",
+            &json!({
+                "height": 1,
+                "hash32": "11".repeat(32),
+                "bits": 12,
+                "chainwork": 0,
+                "timestamp": 1,
+                "prevhash32": "22".repeat(32),
+                "merkle32": "33".repeat(32),
+                "nonce": 1,
+                "miner": "test1111111111111111111111111111111111111111",
+                "pow_digest32": "44".repeat(32)
+            }),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err, "submitblock_missing_txs");
+    }
+
+    #[test]
+    fn rpc_ban_and_unban_peer_round_trip() {
+        let out = handle_rpc(
+            json!({"id":1,"method":"banpeer","params":["203.0.113.11","test"]})
+                .to_string()
+                .as_bytes(),
+            "C:/dutaproject/testnet",
+            "testnet",
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.get("result")
+                .and_then(|x| x.get("ip"))
+                .and_then(|x| x.as_str()),
+            Some("203.0.113.11")
+        );
+
+        let out = handle_rpc(
+            json!({"id":1,"method":"listbanned","params":[]})
+                .to_string()
+                .as_bytes(),
+            "C:/dutaproject/testnet",
+            "testnet",
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let arr = v
+            .get("result")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(arr
+            .iter()
+            .any(|x| x.get("ip").and_then(|y| y.as_str()) == Some("203.0.113.11")));
+
+        let out = handle_rpc(
+            json!({"id":1,"method":"unbanpeer","params":["203.0.113.11"]})
+                .to_string()
+                .as_bytes(),
+            "C:/dutaproject/testnet",
+            "testnet",
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.get("result")
+                .and_then(|x| x.get("removed"))
+                .and_then(|x| x.as_bool()),
+            Some(true)
+        );
+    }
+
 }

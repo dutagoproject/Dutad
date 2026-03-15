@@ -9,8 +9,8 @@ static ERRORLOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 pub fn init(data_dir: &str) -> io::Result<()> {
     let data_dir = data_dir.trim_end_matches('/');
     fs::create_dir_all(data_dir)?;
-    let debug_path = format!("{}/debug.log", data_dir);
-    let error_path = format!("{}/error.log", data_dir);
+    let debug_path = format!("{}/dutad.stdout.log", data_dir);
+    let error_path = format!("{}/dutad.stderr.log", data_dir);
     let debug_f = OpenOptions::new()
         .create(true)
         .append(true)

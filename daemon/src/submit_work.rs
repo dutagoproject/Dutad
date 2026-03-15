@@ -261,6 +261,7 @@ pub(crate) fn accept_mined_block(
     mined_block: &ChainBlock,
 ) -> Result<serde_json::Value, String> {
     store::note_accepted_block(data_dir, mined_block)?;
+    p2p::note_local_tip_height(mined_block.height);
 
     let mut mp = read_mempool_value(data_dir);
     if mp.get("txids").and_then(|x| x.as_array()).is_some()

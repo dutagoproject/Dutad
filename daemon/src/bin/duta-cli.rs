@@ -9,7 +9,11 @@ use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
-#[command(name = "duta-cli", about = "DUTA daemon CLI (RPC client)")]
+#[command(
+    name = "duta-cli",
+    about = "DUTA daemon CLI (RPC client)",
+    after_help = "Examples:\n  duta-cli getpeerinfo\n  duta-cli listbanned\n  duta-cli banpeer 203.0.113.10 launch_abuse\n  duta-cli unbanpeer 203.0.113.10"
+)]
 struct Args {
     #[arg(long)]
     testnet: bool,
@@ -103,6 +107,7 @@ enum Cmd {
     Getinfo,
     Getnetworkinfo,
     Getpeerinfo,
+    Listbanned,
     Getconnectioncount,
     Getrpcinfo,
     Ping,
@@ -112,6 +117,13 @@ enum Cmd {
     },
     Addnode {
         peer: String,
+    },
+    Banpeer {
+        ip: String,
+        reason: Option<String>,
+    },
+    Unbanpeer {
+        ip: String,
     },
     Call {
         method: String,
@@ -236,12 +248,21 @@ fn main() {
         Cmd::Getinfo => rpc_call(&host, port, "getinfo", vec![], timeout),
         Cmd::Getnetworkinfo => rpc_call(&host, port, "getnetworkinfo", vec![], timeout),
         Cmd::Getpeerinfo => rpc_call(&host, port, "getpeerinfo", vec![], timeout),
+        Cmd::Listbanned => rpc_call(&host, port, "listbanned", vec![], timeout),
         Cmd::Getconnectioncount => rpc_call(&host, port, "getconnectioncount", vec![], timeout),
         Cmd::Getrpcinfo => rpc_call(&host, port, "getrpcinfo", vec![], timeout),
         Cmd::Ping => rpc_call(&host, port, "ping", vec![], timeout),
         Cmd::Uptime => rpc_call(&host, port, "uptime", vec![], timeout),
         Cmd::Addpeer { peer } => rpc_call(&host, port, "addpeer", vec![json!(peer)], timeout),
         Cmd::Addnode { peer } => rpc_call(&host, port, "addnode", vec![json!(peer)], timeout),
+        Cmd::Banpeer { ip, reason } => {
+            let mut params = vec![json!(ip)];
+            if let Some(reason) = reason {
+                params.push(json!(reason));
+            }
+            rpc_call(&host, port, "banpeer", params, timeout)
+        }
+        Cmd::Unbanpeer { ip } => rpc_call(&host, port, "unbanpeer", vec![json!(ip)], timeout),
         Cmd::Call { method, params } => rpc_call(
             &host,
             port,

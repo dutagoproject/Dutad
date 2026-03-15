@@ -639,7 +639,14 @@ pub fn height_by_hash(data_dir: &str, hash32: &str) -> Option<u64> {
     }
     let mut arr = [0u8; 8];
     arr.copy_from_slice(&bytes);
-    Some(u64::from_be_bytes(arr))
+    let height = u64::from_be_bytes(arr);
+    let blocks = tree_blocks(&db).ok()?;
+    let block = block_at_from_tree(&blocks, height)?;
+    if block.hash32.eq_ignore_ascii_case(hash32) {
+        Some(height)
+    } else {
+        None
+    }
 }
 fn tree_utxo(db: &sled::Db) -> Result<sled::Tree, String> {
     db.open_tree(b"utxo")
@@ -1163,6 +1170,7 @@ fn rollback_one(
     net: Network,
     meta: &sled::Tree,
     blocks: &sled::Tree,
+    hash_index: &sled::Tree,
     utxo: &sled::Tree,
     undo: &sled::Tree,
 ) -> Result<(), String> {
@@ -1197,7 +1205,12 @@ fn rollback_one(
         }
     }
 
-    // drop block + undo entry
+    // drop block + hash index + undo entry
+    if let Some(tip_block) = block_at_from_tree(blocks, tip_h) {
+        hash_index
+            .remove(tip_block.hash32.as_bytes())
+            .map_err(|e| format!("db_remove_failed: {}", e))?;
+    }
     blocks
         .remove(block_key(tip_h))
         .map_err(|e| format!("db_remove_failed: {}", e))?;
@@ -1250,6 +1263,7 @@ pub fn rollback_to_height(data_dir: &str, target_height: u64) -> Result<(), Stri
     let db = open_db(data_dir)?;
     let meta = tree_meta(&db)?;
     let blocks = tree_blocks(&db)?;
+    let hash_index = tree_hash_index(&db)?;
     let utxo = tree_utxo(&db)?;
     let undo = tree_undo(&db)?;
     let net = infer_network(data_dir);
@@ -1275,7 +1289,7 @@ pub fn rollback_to_height(data_dir: &str, target_height: u64) -> Result<(), Stri
         if h <= target_height {
             break;
         }
-        rollback_one(net, &meta, &blocks, &utxo, &undo)?;
+        rollback_one(net, &meta, &blocks, &hash_index, &utxo, &undo)?;
     }
 
     // Keep legacy chain.json consistent (best-effort).
@@ -1373,6 +1387,7 @@ pub fn prune(data_dir: &str, keep: u64) -> Result<(), String> {
     let db = open_db(data_dir)?;
     let meta = tree_meta(&db)?;
     let blocks = tree_blocks(&db)?;
+    let hash_index = tree_hash_index(&db)?;
     let undo = tree_undo(&db)?;
     let (tip_h, _hash, _cw, _bits) =
         tip_fields_from_tree(&meta).unwrap_or((0, "0".repeat(64), 0, 0));
@@ -1390,6 +1405,9 @@ pub fn prune(data_dir: &str, keep: u64) -> Result<(), String> {
     // delete blocks/undo below prune_below (exclusive): [0, prune_below)
     // Keep genesis(0) and blocks >= prune_below.
     for h in 1..prune_below {
+        if let Some(block) = block_at_from_tree(&blocks, h) {
+            let _ = hash_index.remove(block.hash32.as_bytes());
+        }
         let _ = blocks.remove(block_key(h));
         let _ = undo.remove(undo_key(h));
     }
@@ -1467,9 +1485,9 @@ pub fn bootstrap(data_dir: &str) -> Result<(), String> {
     for b in &chain {
         put_block_db(&blocks, b)?;
         let _ = put_hash_index_db(&hash_index, &b.hash32, b.height);
-        if let Ok(txs) = parse_txs_from_block(b) {
-            // best-effort: build UTXO + undo for historical chain
-            let _ = apply_utxo_for_block(&utxo, &undo, b.height, &txs);
+        if b.txs.is_some() {
+            let txs = parse_txs_from_block(b)?;
+            apply_utxo_for_block(&utxo, &undo, b.height, &txs)?;
         }
     }
 
@@ -1537,7 +1555,8 @@ pub fn validate_candidate_block(data_dir: &str, b: &ChainBlock) -> Result<ChainB
 
     verify_timestamp_policy(&blocks, &b2)?;
     verify_pow_consensus(&blocks, net, &b2)?;
-    if let Ok(txs) = parse_txs_from_block(&b2) {
+    if let Some(_) = b2.txs.as_ref() {
+        let txs = parse_txs_from_block(&b2)?;
         validate_coinbase_devfee(&txs, net, b2.height)?;
         validate_coinbase_subsidy(&utxo, b2.height, &txs)?;
         validate_utxo_invariants_for_block(&utxo, b2.height, &txs)?;
@@ -1590,15 +1609,19 @@ pub fn note_accepted_block(data_dir: &str, b: &ChainBlock) -> Result<(), String>
     verify_timestamp_policy(&blocks, &b2)?;
     verify_pow_consensus(&blocks, net, &b2)?;
 
-    put_block_db(&blocks, &b2)?;
-    put_hash_index_db(&hash_index, &b2.hash32, b2.height)?;
-    if let Ok(txs) = parse_txs_from_block(&b2) {
+    if let Some(_) = b2.txs.as_ref() {
+        let txs = parse_txs_from_block(&b2)?;
         validate_coinbase_devfee(&txs, net, b2.height)?;
         validate_coinbase_subsidy(&utxo, b2.height, &txs)?;
         validate_utxo_invariants_for_block(&utxo, b2.height, &txs)?;
         apply_utxo_for_block(&utxo, &undo, b2.height, &txs)?;
+        put_block_db(&blocks, &b2)?;
+        put_hash_index_db(&hash_index, &b2.hash32, b2.height)?;
         // Best-effort: newly updated UTXO may satisfy some orphan txs
         let _ = crate::submit_tx::orphan_try_promote_file(data_dir);
+    } else {
+        put_block_db(&blocks, &b2)?;
+        put_hash_index_db(&hash_index, &b2.hash32, b2.height)?;
     }
     set_tip_fields_db(&meta, b2.height, b2.hash32.clone(), b2.chainwork, b2.bits)?;
     append_chain_mirror_if_present(data_dir, &b2);
@@ -1771,6 +1794,7 @@ mod tests_a5 {
         let db = open_db(&data_dir).unwrap();
         let meta = tree_meta(&db).unwrap();
         let blocks = tree_blocks(&db).unwrap();
+        let hash_index = tree_hash_index(&db).unwrap();
         let undo = tree_undo(&db).unwrap();
 
         let block1 = ChainBlock {
@@ -1802,6 +1826,8 @@ mod tests_a5 {
 
         put_block_db(&blocks, &block1).unwrap();
         put_block_db(&blocks, &block2).unwrap();
+        put_hash_index_db(&hash_index, &block1.hash32, 1).unwrap();
+        put_hash_index_db(&hash_index, &block2.hash32, 2).unwrap();
         undo.insert(
             undo_key(2),
             serde_json::to_vec(&json!({"created":[],"spent":{}})).unwrap(),
@@ -1810,6 +1836,7 @@ mod tests_a5 {
         set_tip_fields_db(&meta, 2, block2.hash32.clone(), block2.chainwork, block2.bits).unwrap();
         db.flush().unwrap();
         drop(undo);
+        drop(hash_index);
         drop(blocks);
         drop(meta);
         drop(db);
@@ -1821,6 +1848,7 @@ mod tests_a5 {
         assert_eq!(tip_hash, block1.hash32);
         assert_eq!(tip_cw, block1.chainwork);
         assert!(block_at(&data_dir, 2).is_none());
+        assert!(height_by_hash(&data_dir, &block2.hash32).is_none());
         let db = open_db(&data_dir).unwrap();
         let undo = tree_undo(&db).unwrap();
         assert!(undo.get(undo_key(2)).unwrap().is_none());
@@ -1877,6 +1905,7 @@ mod tests_a5 {
         let db = open_db(&data_dir).unwrap();
         let meta = tree_meta(&db).unwrap();
         let blocks = tree_blocks(&db).unwrap();
+        let hash_index = tree_hash_index(&db).unwrap();
         let undo = tree_undo(&db).unwrap();
 
         for h in 1..=3u64 {
@@ -1894,6 +1923,7 @@ mod tests_a5 {
                 txs: None,
             };
             put_block_db(&blocks, &block).unwrap();
+            put_hash_index_db(&hash_index, &block.hash32, h).unwrap();
             undo.insert(
                 undo_key(h),
                 serde_json::to_vec(&json!({"created":[],"spent":{}})).unwrap(),
@@ -1903,6 +1933,7 @@ mod tests_a5 {
         set_tip_fields_db(&meta, 3, format!("{:064x}", 3), 6, 1).unwrap();
         db.flush().unwrap();
         drop(undo);
+        drop(hash_index);
         drop(blocks);
         drop(meta);
         drop(db);
@@ -1911,6 +1942,7 @@ mod tests_a5 {
 
         assert_eq!(prune_below(&data_dir), 2);
         assert!(block_at(&data_dir, 1).is_none());
+        assert!(height_by_hash(&data_dir, &format!("{:064x}", 1)).is_none());
         assert!(block_at(&data_dir, 2).is_some());
     }
 
@@ -2007,6 +2039,42 @@ mod tests_a5 {
     }
 
     #[test]
+    fn rejected_block_does_not_leave_partial_block_or_hash_index_artifacts() {
+        let data_dir = temp_datadir("reject-no-partial-state");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        bootstrap(&data_dir).unwrap();
+        let block = ChainBlock {
+            height: 0,
+            hash32: "77".repeat(32),
+            bits: pow_start_bits(Network::Mainnet),
+            chainwork: 0,
+            timestamp: Some(1),
+            prevhash32: Some("00".repeat(32)),
+            merkle32: Some("88".repeat(32)),
+            nonce: Some(0),
+            miner: Some("dut111111111111111111111111111111111111111111".to_string()),
+            pow_digest32: Some("77".repeat(32)),
+            txs: Some(json!({
+                "deadbeef": {
+                    "vin": [],
+                    "vout": [
+                        {
+                            "addr":"dut111111111111111111111111111111111111111111",
+                            "value": 50
+                        }
+                    ],
+                    "genesis_message": "lab-bad-txid-key"
+                }
+            })),
+        };
+
+        let err = note_accepted_block(&data_dir, &block).unwrap_err();
+        assert!(err.contains("txid_mismatch"));
+        assert!(block_at(&data_dir, 0).is_none());
+        assert!(height_by_hash(&data_dir, &block.hash32).is_none());
+    }
+
+    #[test]
     fn bootstrap_rejects_non_contiguous_legacy_chain() {
         let data_dir = temp_datadir("bootstrap-invalid-gap");
         ensure_datadir_meta(&data_dir, "mainnet").unwrap();
@@ -2069,6 +2137,42 @@ mod tests_a5 {
 
         let err = bootstrap(&data_dir).unwrap_err();
         assert!(err.contains("chain_bootstrap_bad_genesis_link"));
+    }
+
+    #[test]
+    fn bootstrap_rejects_legacy_chain_with_malformed_txs() {
+        let data_dir = temp_datadir("bootstrap-invalid-txs");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+
+        let chain = vec![ChainBlock {
+            height: 1,
+            hash32: "11".repeat(32),
+            bits: 1,
+            chainwork: 1,
+            timestamp: Some(100),
+            prevhash32: Some(genesis_hash(Network::Mainnet).to_string()),
+            merkle32: Some("22".repeat(32)),
+            nonce: Some(1),
+            miner: Some("miner-a".to_string()),
+            pow_digest32: Some("33".repeat(32)),
+            txs: Some(json!({
+                "deadbeef": {
+                    "vin": [],
+                    "vout": [
+                        {
+                            "addr":"dut111111111111111111111111111111111111111111",
+                            "value": 50
+                        }
+                    ],
+                    "genesis_message": "legacy-bad-txid-key"
+                }
+            })),
+        }];
+        let body = serde_json::to_string(&chain).unwrap();
+        std::fs::write(format!("{}/chain.json", data_dir), body).unwrap();
+
+        let err = bootstrap(&data_dir).unwrap_err();
+        assert!(err.contains("txid_mismatch"));
     }
 
     #[test]

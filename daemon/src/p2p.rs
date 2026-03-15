@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -54,6 +54,7 @@ struct P2pConfig {
     net: String,
     local_ip: String,
     seeds: Vec<String>,
+    data_dir: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -163,6 +164,7 @@ fn bootstrap_has_healthy_peer() -> bool {
 
 fn log_dial_failed(addr: &str, err: &str) {
     let healthy = bootstrap_has_healthy_peer();
+    let transient = is_transient_dial_error(err);
     let interval_secs = if is_transient_dial_error(err) {
         if healthy { 1800 } else { 300 }
     } else {
@@ -172,7 +174,21 @@ fn log_dial_failed(addr: &str, err: &str) {
     let mut state = match dial_fail_log_state().lock() {
         Ok(g) => g,
         Err(_) => {
-            wlog!("p2p: bootstrap_retry addr={} err={}", addr, err);
+            if transient && healthy {
+                dlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=healthy action=backoff",
+                    addr,
+                    err
+                );
+            } else if transient {
+                wlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=degraded action=backoff",
+                    addr,
+                    err
+                );
+            } else {
+                wlog!("p2p: bootstrap_retry addr={} err={}", addr, err);
+            }
             return;
         }
     };
@@ -183,15 +199,47 @@ fn log_dial_failed(addr: &str, err: &str) {
         let suppressed = entry.1;
         *entry = (now, 0, err.to_string());
         if suppressed > 0 {
-            wlog!(
-                "p2p: bootstrap_retry addr={} err={} suppressed={} window_secs={}",
-                addr,
-                err,
-                suppressed,
-                interval_secs
-            );
+            if transient && healthy {
+                dlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=healthy suppressed={} window_secs={} action=backoff",
+                    addr,
+                    err,
+                    suppressed,
+                    interval_secs
+                );
+            } else if transient {
+                wlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=degraded suppressed={} window_secs={} action=backoff",
+                    addr,
+                    err,
+                    suppressed,
+                    interval_secs
+                );
+            } else {
+                wlog!(
+                    "p2p: bootstrap_retry addr={} err={} suppressed={} window_secs={}",
+                    addr,
+                    err,
+                    suppressed,
+                    interval_secs
+                );
+            }
         } else {
-            wlog!("p2p: bootstrap_retry addr={} err={}", addr, err);
+            if transient && healthy {
+                dlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=healthy action=backoff",
+                    addr,
+                    err
+                );
+            } else if transient {
+                wlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=degraded action=backoff",
+                    addr,
+                    err
+                );
+            } else {
+                wlog!("p2p: bootstrap_retry addr={} err={}", addr, err);
+            }
         }
         return;
     }
@@ -200,15 +248,47 @@ fn log_dial_failed(addr: &str, err: &str) {
         entry.0 = now;
         entry.1 = 0;
         if suppressed > 0 {
-            wlog!(
-                "p2p: bootstrap_retry addr={} err={} suppressed={} window_secs={}",
-                addr,
-                err,
-                suppressed,
-                interval_secs
-            );
+            if transient && healthy {
+                dlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=healthy suppressed={} window_secs={} action=backoff",
+                    addr,
+                    err,
+                    suppressed,
+                    interval_secs
+                );
+            } else if transient {
+                wlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=degraded suppressed={} window_secs={} action=backoff",
+                    addr,
+                    err,
+                    suppressed,
+                    interval_secs
+                );
+            } else {
+                wlog!(
+                    "p2p: bootstrap_retry addr={} err={} suppressed={} window_secs={}",
+                    addr,
+                    err,
+                    suppressed,
+                    interval_secs
+                );
+            }
         } else {
-            wlog!("p2p: bootstrap_retry addr={} err={}", addr, err);
+            if transient && healthy {
+                dlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=healthy action=backoff",
+                    addr,
+                    err
+                );
+            } else if transient {
+                wlog!(
+                    "p2p: bootstrap_retry_transient addr={} err={} bootstrap_health=degraded action=backoff",
+                    addr,
+                    err
+                );
+            } else {
+                wlog!("p2p: bootstrap_retry addr={} err={}", addr, err);
+            }
         }
     } else {
         entry.1 = entry.1.saturating_add(1);
@@ -241,21 +321,18 @@ pub fn best_seen_height() -> u64 {
     BEST_SEEN_HEIGHT.load(Ordering::Relaxed)
 }
 
+pub fn note_local_tip_height(h: u64) {
+    note_seen_height(h);
+}
+
 /// Public operator-facing P2P counters (non-consensus). Intended for admin RPC /rpc getpeerinfo/getnetworkinfo.
 pub fn p2p_public_info() -> serde_json::Value {
     let st = state();
     let connections = st.inbound_total.load(Ordering::Relaxed) as u64;
     let best_h = best_seen_height();
 
-    let ban_count = st
-        .bans
-        .lock()
-        .map(|mut b| {
-            let now = Instant::now();
-            b.retain(|_, &mut until| until > now);
-            b.len() as u64
-        })
-        .unwrap_or(0);
+    let bans = list_banned_entries();
+    let ban_count = bans.len() as u64;
 
     let top_ips = st
         .inbound_per_ip
@@ -337,6 +414,7 @@ pub fn p2p_public_info() -> serde_json::Value {
         "connections": connections,
         "best_seen_height": best_h,
         "ban_count": ban_count,
+        "bans": bans,
         "seed_count": seed_count,
         "configured_seeds": configured_seeds,
         "local_ip": local_ip,
@@ -370,7 +448,7 @@ fn note_seen_height(h: u64) {
 const MAX_INBOUND: usize = 128;
 const MAX_INBOUND_PER_IP: usize = 8;
 const MAX_INBOUND_PER_SUBNET24: usize = 12;
-const MAX_LINE_BYTES: usize = 64 * 1024;
+const MAX_LINE_BYTES: usize = 512 * 1024;
 const MAX_MSGS_PER_SEC: u32 = 200;
 const MAX_BYTES_PER_SEC: usize = 512 * 1024;
 const BAN_THRESHOLD: u32 = 100;
@@ -420,11 +498,14 @@ static RESYNC_BACKOFF: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new
 static DIAL_BACKOFF: OnceLock<Mutex<HashMap<String, (u32, Instant)>>> = OnceLock::new();
 static KNOWN_PEERS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 static PEERS_LAST_FLUSH: OnceLock<Mutex<Instant>> = OnceLock::new();
+static BLOCK_BROADCAST_STATE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 const SEEDS_FILE: &str = "seeds.txt";
 const PEERS_FILE: &str = "peers.txt";
 const PEERS_MAX: usize = 512;
 const PEERS_FLUSH_INTERVAL_SECS: u64 = 15;
+// A larger batch window helps peers discover older fork points and converge
+// without needing a full datadir wipe after short-lived network splits.
 const MAX_BLOCKS_PER_MSG: usize = 64;
 const MAX_PEER_TOKEN_LEN: usize = 255;
 const OUTBOUND_BAD_PEER_COOLDOWN_SECS: u64 = 30 * 60;
@@ -433,6 +514,7 @@ const OUTBOUND_BAD_PEER_DOMINANT_FAILS: u64 = 12;
 const OUTBOUND_BAD_PEER_MAX_EXPOSED: usize = 32;
 const MAX_OUTBOUND_DIALS_PER_TICK: usize = 24;
 const BLOCK_BROADCAST_FANOUT: usize = 16;
+const BLOCK_BROADCAST_MIN_INTERVAL_MS: u64 = 500;
 const TX_BROADCAST_FANOUT: usize = 8;
 const CONNECT_TIMEOUT_SECS: u64 = 5;
 const CONNECT_TRANSIENT_RETRIES: usize = 3;
@@ -1075,6 +1157,71 @@ fn is_banned(ip: IpAddr) -> bool {
     false
 }
 
+fn list_banned_entries() -> Vec<serde_json::Value> {
+    let now = Instant::now();
+    state()
+        .bans
+        .lock()
+        .map(|mut bans| {
+            bans.retain(|_, until| *until > now);
+            let mut out: Vec<(IpAddr, u64)> = bans
+                .iter()
+                .map(|(ip, until)| (*ip, until.saturating_duration_since(now).as_secs()))
+                .collect();
+            out.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+            out.into_iter()
+                .map(|(ip, ttl_secs)| json!({"ip": ip.to_string(), "ttl_secs": ttl_secs}))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn list_banned_json() -> serde_json::Value {
+    serde_json::Value::Array(list_banned_entries())
+}
+
+pub fn ban_peer_manual(ip: &str, reason: Option<&str>) -> Result<serde_json::Value, String> {
+    let ip = ip
+        .trim()
+        .parse::<IpAddr>()
+        .map_err(|_| "invalid_ip".to_string())?;
+    let reason = reason
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("manual_operator_ban");
+    ban_ip(ip, reason);
+    if let Ok(mut scores) = state().ip_scores.lock() {
+        scores.remove(&ip);
+    }
+    Ok(json!({
+        "ok": true,
+        "ip": ip.to_string(),
+        "reason": reason,
+        "ttl_secs": BAN_TTL_SECS
+    }))
+}
+
+pub fn unban_peer_manual(ip: &str) -> Result<serde_json::Value, String> {
+    let ip = ip
+        .trim()
+        .parse::<IpAddr>()
+        .map_err(|_| "invalid_ip".to_string())?;
+    let removed = state()
+        .bans
+        .lock()
+        .map(|mut bans| bans.remove(&ip).is_some())
+        .unwrap_or(false);
+    if let Ok(mut scores) = state().ip_scores.lock() {
+        scores.remove(&ip);
+    }
+    dlog!("p2p: unban ip={} removed={}", ip, removed);
+    Ok(json!({
+        "ok": true,
+        "ip": ip.to_string(),
+        "removed": removed
+    }))
+}
+
 fn subnet24_key(ip: IpAddr) -> Option<u32> {
     match ip {
         IpAddr::V4(v4) => {
@@ -1091,6 +1238,13 @@ fn subnet24_key(ip: IpAddr) -> Option<u32> {
             }
         }
         IpAddr::V6(_) => None,
+    }
+}
+
+fn ip_is_loopback_or_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
     }
 }
 
@@ -1185,12 +1339,9 @@ fn try_accept_peer(ip: IpAddr) -> Option<PeerGuard> {
     Some(PeerGuard { ip, subnet24 })
 }
 
-fn read_line_limited(
-    reader: &mut BufReader<TcpStream>,
-    buf: &mut Vec<u8>,
-) -> std::io::Result<usize> {
+fn read_line_limited<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> std::io::Result<usize> {
     buf.clear();
-    let n = reader.read_until(b'\n', buf)?;
+    let n = reader.by_ref().take((MAX_LINE_BYTES + 1) as u64).read_until(b'\n', buf)?;
     if n == 0 {
         return Ok(0);
     }
@@ -1211,8 +1362,15 @@ fn detect_local_ip(seed_ip: &str) -> Option<String> {
 }
 
 fn reorg_overlap_from(tip_h: u64) -> usize {
+    // Keep enough overlap to include a recent fork point, but not so much that a
+    // single batch ends before the competing peer's current tip. The overlap should
+    // leave room in the same response for blocks above our local tip.
     let overlap = (MAX_BLOCKS_PER_MSG / 2) as u64;
     tip_h.saturating_sub(overlap) as usize
+}
+
+fn should_accept_reorg_candidate(current_tip_cw: u64, incoming_cw: u64) -> bool {
+    incoming_cw > current_tip_cw
 }
 
 fn connect_peer(addr: &str) -> Result<TcpStream, String> {
@@ -1250,6 +1408,62 @@ fn send_msg(stream: &mut TcpStream, msg: &Msg) -> std::io::Result<()> {
     stream.write_all(line.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()
+}
+
+fn serve_broadcast_followups(
+    stream: &mut TcpStream,
+    data_dir: &str,
+    max_wait: Duration,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(max_wait)).ok();
+    let reader_stream = stream.try_clone()?;
+    let mut reader = BufReader::new(reader_stream);
+    let mut raw = Vec::<u8>::new();
+    loop {
+        match read_line_limited(&mut reader, &mut raw) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+
+        let line = String::from_utf8_lossy(&raw).trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(msg) = read_msg_line(&line) else {
+            continue;
+        };
+        match msg {
+            Msg::GetTip {} => {
+                let (h, hash32, cw, bits) = tip_fields(data_dir);
+                let _ = send_msg(
+                    stream,
+                    &Msg::Tip {
+                        height: h,
+                        hash32,
+                        chainwork: cw,
+                        bits,
+                    },
+                );
+            }
+            Msg::GetBlocksFrom { from, limit } => {
+                let limit = limit.min(MAX_BLOCKS_PER_MSG);
+                if let Some(body) = blocks_from_json(data_dir, from, limit) {
+                    if let Ok(blocks) = serde_json::from_str::<Vec<ChainBlock>>(&body) {
+                        let _ = send_msg(stream, &Msg::Blocks { blocks });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn read_msg_line(line: &str) -> Option<Msg> {
@@ -1310,6 +1524,9 @@ fn validate_block_basic(
     if prev != expected_prevhash32 {
         return Err("bad_prevhash32".to_string());
     }
+    if block.height > 0 && block.txs.is_none() {
+        return Err("missing_block_txs".to_string());
+    }
     Ok(())
 }
 
@@ -1339,6 +1556,20 @@ fn validate_blocks_from(
 }
 
 fn penalize_bad_blocks(peer: &str, peer_ip: IpAddr, err: &str) {
+    // Private mesh peers can legitimately race during catch-up and briefly send
+    // stale/out-of-order blocks after we have already requested a resync.
+    // Treat those as recovery noise, not hostile misbehavior, or clustered
+    // launch nodes will end up temp-banning each other under burst mining.
+    if ip_is_loopback_or_private(peer_ip) && err.contains("stale_or_out_of_order_block") {
+        dlog!(
+            "p2p: reject blocks peer={} ip={} err={} action=ignore_penalty_private_resync",
+            peer,
+            peer_ip,
+            err
+        );
+        return;
+    }
+
     // Treat invalid blocks (including PoW/bits/consensus failures) as misbehavior.
     // This is required for public-go hardening: don't silently burn CPU on spam.
     let ip_score = add_ip_score(peer_ip, 50, "invalid_block");
@@ -1405,6 +1636,11 @@ fn handle_peer(
 
     let mut raw = Vec::<u8>::new();
     loop {
+        if is_banned(peer_ip) {
+            note_inbound_peer_error(&peer, "manually_banned");
+            edlog!("p2p: disconnect peer={} ip={} reason=banned", peer, peer_ip);
+            break;
+        }
         let now = Instant::now();
         if now.duration_since(win_start) >= Duration::from_secs(1) {
             win_start = now;
@@ -1414,7 +1650,11 @@ fn handle_peer(
         win_count = win_count.saturating_add(1);
         if win_count > MAX_MSGS_PER_SEC {
             score = score.saturating_add(25);
-            let ip_score = add_ip_score(peer_ip, 25, "rate_limited");
+            let ip_score = if ip_is_loopback_or_private(peer_ip) {
+                0
+            } else {
+                add_ip_score(peer_ip, 25, "rate_limited")
+            };
             edlog!(
                 "p2p: rate_limited peer={} ip={} score={} ip_score={}",
                 peer,
@@ -1431,7 +1671,11 @@ fn handle_peer(
                 win_bytes = win_bytes.saturating_add(raw.len());
                 if win_bytes > MAX_BYTES_PER_SEC {
                     score = score.saturating_add(25);
-                    let ip_score = add_ip_score(peer_ip, 25, "rate_limited_bytes");
+                    let ip_score = if ip_is_loopback_or_private(peer_ip) {
+                        0
+                    } else {
+                        add_ip_score(peer_ip, 25, "rate_limited_bytes")
+                    };
                     edlog!(
                         "p2p: rate_limited_bytes peer={} ip={} bytes={} score={} ip_score={}",
                         peer,
@@ -1542,10 +1786,31 @@ fn handle_peer(
             }
             Msg::GetBlocksFrom { from, limit } => {
                 let limit = limit.min(MAX_BLOCKS_PER_MSG);
-                let body =
-                    blocks_from_json(&data_dir, from, limit).unwrap_or_else(|| "[]".to_string());
-                let blocks: Vec<ChainBlock> = serde_json::from_str(&body).unwrap_or_default();
-                let _ = send_msg(&mut stream, &Msg::Blocks { blocks });
+                match blocks_from_json(&data_dir, from, limit) {
+                    Some(body) => match serde_json::from_str::<Vec<ChainBlock>>(&body) {
+                        Ok(blocks) => {
+                            let _ = send_msg(&mut stream, &Msg::Blocks { blocks });
+                        }
+                        Err(e) => {
+                            let _ = send_msg(
+                                &mut stream,
+                                &Msg::Error {
+                                    error: "blocks_encode_failed".to_string(),
+                                    detail: format!("invalid_blocks_json: {}", e),
+                                },
+                            );
+                        }
+                    },
+                    None => {
+                        let _ = send_msg(
+                            &mut stream,
+                            &Msg::Error {
+                                error: "blocks_encode_failed".to_string(),
+                                detail: "blocks_from_unavailable".to_string(),
+                            },
+                        );
+                    }
+                }
             }
             Msg::Blocks { blocks } => {
                 let (tip_h, tip_hash, tip_cw, _bits) = tip_fields(&data_dir);
@@ -1689,7 +1954,7 @@ fn handle_peer(
                             let incoming_cw =
                                 store::compute_chainwork_for_candidate(&data_dir, fp, slice)
                                     .unwrap_or(0);
-                            if incoming_cw <= tip_cw {
+                            if !should_accept_reorg_candidate(tip_cw, incoming_cw) {
                                 edlog!(
                                     "p2p: ignore fork blocks peer={} first_height={} incoming_cw={} tip_cw={}",
                                     peer,
@@ -1785,7 +2050,9 @@ fn handle_peer(
                                 std::slice::from_ref(&block),
                             )
                             .unwrap_or(0);
-                            if prevb.hash32 == prev && cand_cw > tip_cw {
+                            if prevb.hash32 == prev
+                                && should_accept_reorg_candidate(tip_cw, cand_cw)
+                            {
                                 if let Err(e) = store::rollback_to_height(&data_dir, fp) {
                                     edlog!("p2p: reorg rollback_failed peer={} err={}", peer, e);
                                     continue;
@@ -2008,7 +2275,18 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                             let first = &blocks[0];
                             let first_prev = first.prevhash32.clone().unwrap_or_default();
                             if first.height == tip_h.saturating_add(1) && first_prev == tip_hash {
-                                let appended = try_append_blocks(data_dir, &blocks).unwrap_or(0);
+                                let appended = match try_append_blocks(data_dir, &blocks) {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        edlog!(
+                                            "p2p: append_failed peer={} first_height={} err={}",
+                                            addr,
+                                            first.height,
+                                            e
+                                        );
+                                        0
+                                    }
+                                };
                                 if appended > 0 && blocks.len() >= MAX_BLOCKS_PER_MSG {
                                     let from = blocks
                                         .last()
@@ -2068,11 +2346,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                 let incoming_cw =
                                     store::compute_chainwork_for_candidate(&data_dir, fp_h, slice)
                                         .unwrap_or(0);
-                                if incoming_cw > tip_cw
-                                    || (incoming_cw == tip_cw
-                                        && slice.last().map(|b| b.hash32.as_str()).unwrap_or("")
-                                            > tip_hash.as_str())
-                                {
+                                if should_accept_reorg_candidate(tip_cw, incoming_cw) {
                                     match store::rollback_to_height(data_dir, fp_h) {
                                         Ok(()) => {
                                             let appended = match try_append_blocks(data_dir, slice)
@@ -2159,7 +2433,27 @@ pub fn broadcast_block(block: &ChainBlock) {
         &cfg.local_ip,
         BLOCK_BROADCAST_FANOUT,
     );
+    let now = Instant::now();
     for addr in targets.iter() {
+        let state = BLOCK_BROADCAST_STATE.get_or_init(|| Mutex::new(HashMap::new()));
+        let should_send = {
+            let mut g = lock_or_recover(state, "block_broadcast_state");
+            match g.get(addr).copied() {
+                Some(last)
+                    if now.duration_since(last)
+                        < Duration::from_millis(BLOCK_BROADCAST_MIN_INTERVAL_MS) =>
+                {
+                    false
+                }
+                _ => {
+                    g.insert(addr.clone(), now);
+                    true
+                }
+            }
+        };
+        if !should_send {
+            continue;
+        }
         if let Ok(mut stream) = connect_peer(addr) {
             stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
             stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
@@ -2175,6 +2469,11 @@ pub fn broadcast_block(block: &ChainBlock) {
                 &Msg::Block {
                     block: block.clone(),
                 },
+            );
+            let _ = serve_broadcast_followups(
+                &mut stream,
+                &cfg.data_dir,
+                Duration::from_millis(250),
             );
             sent += 1;
         }
@@ -2266,6 +2565,7 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
         net: net.clone(),
         local_ip: local_ip.clone(),
         seeds: seeds.clone(),
+        data_dir: data_dir.clone(),
     });
     dlog!(
         "p2p: bootstrap source={} seeds={} persisted_peers={} local_ip={} port={}",
@@ -2366,5 +2666,161 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
             dial_note_result(addr, ok);
         }
         thread::sleep(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ban_peer_manual, canonicalize_peer_token, is_transient_dial_error, list_banned_json,
+        normalize_bootstrap_candidates, parse_peers_text, read_line_limited, reorg_overlap_from,
+        should_accept_reorg_candidate, subnet24_key, unban_peer_manual, validate_block_basic,
+        MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
+    };
+    use crate::ChainBlock;
+    use std::io::{BufReader, Cursor};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn reorg_candidate_requires_strictly_higher_chainwork() {
+        assert!(!should_accept_reorg_candidate(100, 100));
+        assert!(!should_accept_reorg_candidate(100, 99));
+        assert!(should_accept_reorg_candidate(100, 101));
+    }
+
+    #[test]
+    fn reorg_overlap_leaves_room_for_competing_tip_blocks() {
+        assert_eq!(reorg_overlap_from(10), 0);
+        assert_eq!(reorg_overlap_from(50), 18);
+        assert_eq!(reorg_overlap_from((MAX_BLOCKS_PER_MSG / 2) as u64), 0);
+        assert_eq!(
+            reorg_overlap_from(MAX_BLOCKS_PER_MSG as u64),
+            MAX_BLOCKS_PER_MSG / 2
+        );
+        assert_eq!(reorg_overlap_from(128), 96);
+        assert_eq!(reorg_overlap_from(500), 500usize - (MAX_BLOCKS_PER_MSG / 2));
+    }
+
+    #[test]
+    fn read_line_limited_rejects_oversized_peer_line() {
+        let payload = vec![b'x'; MAX_LINE_BYTES + 32];
+        let mut reader = BufReader::new(Cursor::new(payload));
+        let mut buf = Vec::new();
+        let err = read_line_limited(&mut reader, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "line_too_large");
+    }
+
+    #[test]
+    fn transient_dial_error_classification_matches_expected_strings() {
+        assert!(is_transient_dial_error("Resource temporarily unavailable (os error 11)"));
+        assert!(is_transient_dial_error("operation would block"));
+        assert!(is_transient_dial_error("timed out"));
+        assert!(!is_transient_dial_error("connection refused"));
+    }
+
+    #[test]
+    fn canonicalize_peer_token_rejects_urls_and_paths() {
+        assert!(canonicalize_peer_token("http://seed.example.com:18082").is_none());
+        assert!(canonicalize_peer_token("seed.example.com/path").is_none());
+        assert!(canonicalize_peer_token("seed.example.com?x=1").is_none());
+    }
+
+    #[test]
+    fn canonicalize_peer_token_normalizes_hosts_and_socket_addrs() {
+        assert_eq!(
+            canonicalize_peer_token("Seed.Example.Com:18082"),
+            Some("seed.example.com:18082".to_string())
+        );
+        assert_eq!(
+            canonicalize_peer_token("127.0.0.1:18082"),
+            Some("127.0.0.1:18082".to_string())
+        );
+        assert_eq!(
+            canonicalize_peer_token("2001:db8::1"),
+            Some("2001:db8::1".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_peers_text_deduplicates_and_ignores_comments() {
+        let peers = parse_peers_text(
+            "seed.example.com:18082\n\
+             seed.example.com:18082 # dup\n\
+             127.0.0.1:18082, 127.0.0.1:18082\n\
+             invalid/path\n",
+        );
+        assert_eq!(
+            peers,
+            vec![
+                "seed.example.com:18082".to_string(),
+                "127.0.0.1:18082".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_bootstrap_candidates_deduplicates_equivalent_inputs() {
+        let out = normalize_bootstrap_candidates(
+            vec![
+                "localhost:18082".to_string(),
+                "LOCALHOST:18082".to_string(),
+                "127.0.0.1:18082".to_string(),
+                "invalid/path".to_string(),
+            ],
+            "18082",
+        );
+        assert_eq!(out, vec!["localhost:18082".to_string()]);
+    }
+
+    #[test]
+    fn subnet24_key_ignores_private_and_loopback_ranges() {
+        assert_eq!(subnet24_key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), None);
+        assert_eq!(subnet24_key(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))), None);
+        assert_eq!(subnet24_key(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))), None);
+    }
+
+    #[test]
+    fn subnet24_key_returns_public_prefix_key() {
+        assert_eq!(
+            subnet24_key(IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4))),
+            Some((8u32 << 16) | (8u32 << 8) | 4u32)
+        );
+    }
+
+    #[test]
+    fn validate_block_basic_rejects_non_genesis_block_without_txs() {
+        let block = ChainBlock {
+            height: 1,
+            hash32: "11".repeat(32),
+            bits: 12,
+            chainwork: 0,
+            timestamp: Some(1),
+            prevhash32: Some("22".repeat(32)),
+            merkle32: Some("33".repeat(32)),
+            nonce: Some(1),
+            miner: Some("test1111111111111111111111111111111111111111".to_string()),
+            pow_digest32: Some("44".repeat(32)),
+            txs: None,
+        };
+        assert_eq!(
+            validate_block_basic(1, &"22".repeat(32), &block).unwrap_err(),
+            "missing_block_txs"
+        );
+    }
+
+    #[test]
+    fn manual_ban_and_unban_round_trip() {
+        let banned = ban_peer_manual("203.0.113.9", Some("test")).unwrap();
+        assert_eq!(banned.get("ip").and_then(|v| v.as_str()), Some("203.0.113.9"));
+        let list = list_banned_json();
+        let arr = list.as_array().cloned().unwrap_or_default();
+        assert!(arr.iter().any(|v| v.get("ip").and_then(|x| x.as_str()) == Some("203.0.113.9")));
+
+        let unbanned = unban_peer_manual("203.0.113.9").unwrap();
+        assert_eq!(unbanned.get("removed").and_then(|v| v.as_bool()), Some(true));
+        let list = list_banned_json();
+        let arr = list.as_array().cloned().unwrap_or_default();
+        assert!(!arr.iter().any(|v| v.get("ip").and_then(|x| x.as_str()) == Some("203.0.113.9")));
     }
 }

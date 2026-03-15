@@ -14,19 +14,19 @@ Stratum and pool-oriented mining should live in their own repo.
 Mainnet defaults:
 
 - daemon admin RPC: `127.0.0.1:19083`
-- public mining listener: `0.0.0.0:19085` when enabled
+- mining listener: disabled by default, `19085` when explicitly enabled
 
 Testnet defaults:
 
 - daemon admin RPC: `127.0.0.1:18083`
-- public mining listener: `0.0.0.0:18085` when enabled
+- mining listener: disabled by default, `18085` when explicitly enabled
 
 ## Solo mining with `dutaminer`
 
-First start the daemon with a public mining listener:
+First start the daemon with an explicit mining listener:
 
 ```bash
-./dutad --datadir ./data/mainnet --mining-bind 0.0.0.0:19085
+./dutad --datadir ./data/mainnet --mining-bind 127.0.0.1:19085
 ```
 
 Then start the miner:
@@ -60,6 +60,7 @@ This is height-based, not wall-clock based, so all miners and nodes reach the sa
 ## Quick operator checklist
 
 - keep daemon admin RPC on `127.0.0.1`
+- keep mining listener on `127.0.0.1` unless you intentionally need remote miners
 - expose only the mining listener if you actually need remote solo miners
 - use a real wallet address for mining rewards
 - watch daemon logs for `BLOCK_REJECT` and wallet address errors
@@ -90,7 +91,7 @@ If the daemon rejects work with `invalid_address`, check:
 For a solo mining node:
 
 1. run `dutad` with admin RPC local-only
-2. expose only the mining listener if you want HTTP mining
+2. keep mining on loopback by default, or expose it only after firewall review
 3. keep reward destination management outside the public daemon surface
 
 This keeps the public mining surface separate from the admin surface.

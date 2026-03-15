@@ -121,6 +121,10 @@ pub(crate) fn mining_address_is_valid(addr: &str) -> bool {
     address::parse_address(addr.trim()).is_some()
 }
 
+fn mining_address_is_valid_for_network(net: Network, addr: &str) -> bool {
+    address::parse_address_for_network(net, addr.trim()).is_some()
+}
+
 fn target_bytes_from_leading_zero_bits(bits: u64) -> [u8; 32] {
     let mut out = [0xffu8; 32];
     if bits == 0 {
@@ -182,8 +186,13 @@ pub(crate) fn build_work_template(
     if miner.is_empty() {
         return Err("missing_address".to_string());
     }
-    if !mining_address_is_valid(miner) {
+    let net = net_from_datadir(data_dir);
+    if !mining_address_is_valid_for_network(net, miner) {
         return Err("invalid_address".to_string());
+    }
+    let dev_addr = netparams::devfee_addrs(net)[0];
+    if miner == dev_addr {
+        return Err("miner_address_conflicts_with_devfee".to_string());
     }
 
     let mp = read_mempool_value(data_dir);
@@ -222,8 +231,6 @@ pub(crate) fn build_work_template(
 
     let subsidy = block_subsidy(height);
     let reward_total = subsidy.saturating_add(fees_total);
-    let net = net_from_datadir(data_dir);
-    let dev_addr = netparams::devfee_addrs(net)[0];
     let dev_bps = netparams::devfee_bps(net, height);
     let dev_amt = reward_total.saturating_mul(dev_bps) / 10_000;
     let miner_amt = reward_total.saturating_sub(dev_amt);
@@ -373,6 +380,9 @@ pub fn handle_work(
         Ok(v) => v,
         Err(e) if e == "missing_address" => json!({"ok":false,"error":"missing_address"}),
         Err(e) if e == "invalid_address" => json!({"ok":false,"error":"invalid_address"}),
+        Err(e) if e == "miner_address_conflicts_with_devfee" => {
+            json!({"ok":false,"error":"miner_address_conflicts_with_devfee"})
+        }
         Err(e) if e == "busy" => {
             wlog!(
                 "[dutad] WORK_REJECT addr={} reason=busy",
@@ -474,9 +484,9 @@ pub(crate) fn insert_test_work(work_id: &str, item: WorkItem) {
 
 #[cfg(test)]
 mod tests {
-    use super::{mining_address_is_valid, net_from_datadir};
+    use super::{mining_address_is_valid, mining_address_is_valid_for_network, net_from_datadir};
     use crate::store;
-    use duta_core::netparams::Network;
+    use duta_core::netparams::{self, Network};
 
     #[test]
     fn net_from_datadir_prefers_meta_over_path_name() {
@@ -504,5 +514,33 @@ mod tests {
             "stg1111111111111111111111111111111111111111"
         ));
         assert!(!mining_address_is_valid("btc1111111111111111111111111111111111111111"));
+    }
+
+    #[test]
+    fn mining_address_validation_enforces_active_network_prefix() {
+        assert!(mining_address_is_valid_for_network(
+            Network::Testnet,
+            "test1111111111111111111111111111111111111111"
+        ));
+        assert!(!mining_address_is_valid_for_network(
+            Network::Testnet,
+            "dut1111111111111111111111111111111111111111"
+        ));
+    }
+
+    #[test]
+    fn devfee_address_is_not_allowed_as_miner_address() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-work-devfee-guard-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        let err =
+            super::build_work_template(&data_dir, netparams::DEVFEE_ADDRS_TESTNET[0]).unwrap_err();
+        assert_eq!(err, "miner_address_conflicts_with_devfee");
     }
 }

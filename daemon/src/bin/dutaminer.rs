@@ -67,6 +67,8 @@ struct WorkResp {
     expires_at: u64,
 }
 
+const MIN_POLL_MS: u64 = 50;
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -331,6 +333,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 .unwrap_or("Share rejected.");
             println!("REJECTED share: {} hash={}", msg, mined_hash32);
             println!("reason={}", reason);
+            println!("raw={}", body);
             return;
         }
     }
@@ -353,6 +356,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
         "stale_work" => {
             println!("REJECTED share: Share rejected: stale share (submitted too late). Please fetch new work and try again. hash={}", mined_hash32);
             println!("reason=stale");
+            println!("raw={}", body);
         }
         "pow_invalid" => {
             println!(
@@ -360,6 +364,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 mined_hash32
             );
             println!("reason=low_difficulty");
+            println!("raw={}", body);
         }
         "accept_failed" => {
             if detail.contains("stale_or_out_of_order_block") {
@@ -382,6 +387,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 }
                 println!("reason=invalid");
             }
+            println!("raw={}", body);
         }
         _ => {
             if detail.is_empty() {
@@ -396,14 +402,26 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 );
             }
             println!("reason=invalid");
+            println!("raw={}", body);
         }
     }
+}
+
+fn normalized_poll_ms(poll_ms: u64) -> u64 {
+    poll_ms.max(MIN_POLL_MS)
 }
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
     if args.threads == 0 {
         return Err("--threads must be >= 1".to_string());
+    }
+    let poll_ms = normalized_poll_ms(args.poll_ms);
+    if poll_ms != args.poll_ms {
+        eprintln!(
+            "dutaminer: poll_ms={} too low, using {}ms minimum",
+            args.poll_ms, poll_ms
+        );
     }
 
     // Dataset cache keyed by (epoch, anchor_hash32, mem_mb)
@@ -413,7 +431,7 @@ fn main() -> Result<(), String> {
     let mut rpc = args.rpc.trim_end_matches('/').to_string();
     println!(
         "dutaminer: rpc={} address={} threads={} poll_ms={}",
-        rpc, args.address, args.threads, args.poll_ms
+        rpc, args.address, args.threads, poll_ms
     );
 
     let mut last_hs: f64 = 0.0;
@@ -423,7 +441,7 @@ fn main() -> Result<(), String> {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("work fetch error: {e}");
-                thread::sleep(Duration::from_millis(args.poll_ms));
+                thread::sleep(Duration::from_millis(poll_ms));
                 continue;
             }
         };
@@ -449,7 +467,7 @@ fn main() -> Result<(), String> {
                                     "work fetch http_code={} raw={} (also tried {} http_code={:?})",
                                     c, w_body, alt, alt_code
                                 );
-                                thread::sleep(Duration::from_millis(args.poll_ms));
+                                thread::sleep(Duration::from_millis(poll_ms));
                                 continue;
                             }
                         }
@@ -457,7 +475,7 @@ fn main() -> Result<(), String> {
                 }
 
                 eprintln!("work fetch http_code={} raw={}", c, w_body);
-                thread::sleep(Duration::from_millis(args.poll_ms));
+                thread::sleep(Duration::from_millis(poll_ms));
                 continue;
             }
         }
@@ -466,7 +484,7 @@ fn main() -> Result<(), String> {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("work json parse error: {e}; raw={w_body}");
-                thread::sleep(Duration::from_millis(args.poll_ms));
+                thread::sleep(Duration::from_millis(poll_ms));
                 continue;
             }
         };
@@ -498,8 +516,7 @@ fn main() -> Result<(), String> {
         header[0..32].copy_from_slice(prev.as_bytes());
         header[32..64].copy_from_slice(merkle.as_bytes());
         header[64..72].copy_from_slice(&w.timestamp.to_le_bytes());
-        header[72..76].copy_from_slice(&w.bits.to_le_bytes());
-        // remaining 4 bytes left as zero (nonce is separate input to pow_digest)
+        header[72..80].copy_from_slice(&(w.bits as u64).to_le_bytes());
 
         let anchor = H32::from_hex(&w.anchor_hash32).ok_or("bad anchor_hash32 hex")?;
         let mine_start = std::time::Instant::now();
@@ -553,7 +570,7 @@ fn main() -> Result<(), String> {
                     w.bits,
                     fmt_secs(ttl)
                 );
-                thread::sleep(Duration::from_millis(args.poll_ms));
+                thread::sleep(Duration::from_millis(poll_ms));
                 continue;
             }
         };
@@ -590,11 +607,26 @@ fn main() -> Result<(), String> {
         let body = json!({"work_id": w.work_id, "nonce": nonce}).to_string();
         match http_post_json(&rpc, "/submit_work", &body) {
             Ok((resp_body, resp_code)) => {
+                println!("submit: nonce={} work_id={}", nonce, w.work_id);
                 explain_submit_result(resp_code, &resp_body, &mined_hash32);
             }
             Err(e) => eprintln!("submit error: {e}"),
         }
 
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalized_poll_ms, MIN_POLL_MS};
+
+    #[test]
+    fn poll_ms_is_clamped_to_release_floor() {
+        assert_eq!(normalized_poll_ms(0), MIN_POLL_MS);
+        assert_eq!(normalized_poll_ms(1), MIN_POLL_MS);
+        assert_eq!(normalized_poll_ms(49), MIN_POLL_MS);
+        assert_eq!(normalized_poll_ms(50), 50);
+        assert_eq!(normalized_poll_ms(200), 200);
     }
 }

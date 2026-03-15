@@ -24,7 +24,7 @@ Common flags:
 If you want the node to expose a mining HTTP listener:
 
 ```bash
-cargo run -p dutad -- --datadir ./data/mainnet --mining-bind 0.0.0.0:19085
+cargo run -p dutad -- --datadir ./data/mainnet --mining-bind 127.0.0.1:19085
 ```
 
 This listener is used for endpoints such as:
@@ -36,5 +36,6 @@ This listener is used for endpoints such as:
 ## Basic operational rules
 
 - keep node admin RPC private
+- keep mining on loopback unless public/LAN exposure is intentional
 - use separate data directories for mainnet, testnet, and stagenet
 - treat the public mining listener as an internet-facing service

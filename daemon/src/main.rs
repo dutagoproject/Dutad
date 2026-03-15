@@ -1,14 +1,14 @@
 #[macro_use]
 mod debuglog;
 mod canon_json;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use duta_core::netparams::Network;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -23,8 +23,40 @@ mod submit_work;
 mod utxo_rpc;
 mod work;
 
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_BLUE: &str = "\x1b[34m";
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_WHITE: &str = "\x1b[37m";
+
+fn console_tag(tag: &str, color: &str) -> String {
+    format!("{}{}{: <8}{}", ANSI_BOLD, color, tag, ANSI_RESET)
+}
+
+fn console_kv(tag: &str, color: &str, key: &str, value: impl AsRef<str>) {
+    println!(
+        "{} {}{}{}",
+        console_tag(tag, color),
+        key,
+        format!("{}:{}", ANSI_DIM, ANSI_RESET),
+        value.as_ref()
+    );
+}
+
+fn console_line(tag: &str, color: &str, value: impl AsRef<str>) {
+    println!("{} {}", console_tag(tag, color), value.as_ref());
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "dutad", version, about = "DUTA daemon (Rust skeleton)")]
+#[command(
+    name = "dutad",
+    version,
+    about = "DUTA daemon (Rust skeleton)",
+    after_help = "Examples:\n  dutad --daemon\n  dutad status\n  dutad stop\n  duta-cli getpeerinfo\n  duta-cli listbanned\n  duta-cli banpeer 203.0.113.10 launch_abuse\n  duta-cli unbanpeer 203.0.113.10\n  dutad --testnet --daemon"
+)]
 struct Args {
     /// Data directory (default: ~/.duta/<network>). Overrides config datadir=.
     #[arg(long)]
@@ -45,6 +77,9 @@ struct Args {
     /// Stop background daemon (reads <datadir>/dutad.pid and sends SIGTERM). Use without --daemon.
     #[arg(long)]
     stop: bool,
+
+    #[command(subcommand)]
+    command: Option<Cmd>,
 
     /// Use testnet ports and data directory
     #[arg(long)]
@@ -75,6 +110,14 @@ struct Args {
     /// Add a bootstrap peer (bitcoin-like alias for seeds)
     #[arg(long, num_args = 1..)]
     addnode: Vec<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Cmd {
+    /// Stop background daemon
+    Stop,
+    /// Show daemon status
+    Status,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -200,6 +243,93 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn print_startup_banner(
+    net: Network,
+    data_dir: &str,
+    p2p_addr: &str,
+    rpc_addr: &str,
+    mining_addr: Option<&str>,
+) {
+    println!();
+    console_line(
+        "DAEMON",
+        ANSI_WHITE,
+        format!(
+            "DUTA daemon {} starting on {}",
+            env!("CARGO_PKG_VERSION"),
+            net.as_str()
+        ),
+    );
+    console_kv("PATH", ANSI_YELLOW, "data dir", data_dir);
+    console_kv("P2P", ANSI_CYAN, "bind", p2p_addr);
+    console_kv("RPC", ANSI_BLUE, "bind", rpc_addr);
+    console_kv("MINING", ANSI_GREEN, "bind", mining_addr.unwrap_or("disabled"));
+    println!();
+}
+
+fn print_chain_status(data_dir: &str) {
+    let (tip_height, tip_hash, _tip_chainwork, bits) =
+        store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
+    let best_seen_height = p2p::best_seen_height().max(tip_height);
+    let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
+        1.0
+    } else {
+        tip_height as f64 / best_seen_height as f64
+    };
+    console_line(
+        "CHAIN",
+        ANSI_YELLOW,
+        format!("tip={} bits={} hash={}", tip_height, bits, tip_hash),
+    );
+    if best_seen_height > tip_height {
+        console_line(
+            "SYNC",
+            ANSI_YELLOW,
+            format!(
+                "syncing ({:.2}%) best_seen_height={}",
+            sync_progress * 100.0,
+            best_seen_height
+            ),
+        );
+    } else {
+        console_line("SYNC", ANSI_GREEN, "ready");
+    }
+}
+
+fn print_startup_guidance(rpc_addr: &str) {
+    console_kv("RPC", ANSI_BLUE, "health", format!("http://{}/health", rpc_addr));
+    console_kv("RPC", ANSI_BLUE, "tip", format!("http://{}/tip", rpc_addr));
+    console_line(
+        "STATUS",
+        ANSI_GREEN,
+        "daemon started, waiting for peer sync and block activity",
+    );
+    println!();
+}
+
+fn print_runtime_status_tick(data_dir: &str) {
+    let (tip_height, tip_hash, _tip_chainwork, bits) =
+        store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
+    let best_seen_height = p2p::best_seen_height().max(tip_height);
+    let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
+        1.0
+    } else {
+        tip_height as f64 / best_seen_height as f64
+    };
+    console_line(
+        "STATUS",
+        ANSI_CYAN,
+        format!(
+            "tip={} best_seen={} bits={} sync={:.2}% hash={}",
+        tip_height,
+        best_seen_height,
+        bits,
+        sync_progress * 100.0,
+        tip_hash
+        ),
+    );
 }
 
 fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
@@ -371,7 +501,7 @@ fn ip_is_loopback_or_private(ip: IpAddr) -> bool {
 }
 
 fn request_allows_private_work_burst(request: &tiny_http::Request, kind: &str) -> bool {
-    if kind != "work" {
+    if kind != "work" && kind != "submit" {
         return false;
     }
     request
@@ -514,12 +644,45 @@ fn process_exists(pid: i32) -> bool {
 
     #[cfg(not(windows))]
     {
+        let proc_path = format!("/proc/{}", pid);
+        if std::path::Path::new(&proc_path).exists() {
+            return true;
+        }
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
     }
+}
+
+fn http_health_ready(rpc_addr: &str) -> Result<bool, String> {
+    let mut stream =
+        TcpStream::connect(rpc_addr).map_err(|e| format!("connect {} failed: {}", rpc_addr, e))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    let req = format!(
+        "GET /health HTTP/1.1\r\nHost: {host}\r\nUser-Agent: dutad-daemonize\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        host = rpc_addr
+    );
+    use std::io::Write;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("health_write_failed: {}", e))?;
+    let mut resp = Vec::new();
+    stream
+        .read_to_end(&mut resp)
+        .map_err(|e| format!("health_read_failed: {}", e))?;
+    let resp_s = String::from_utf8_lossy(&resp);
+    let status = resp_s
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| "health_status_missing".to_string())?;
+    Ok(status == 200)
 }
 
 fn terminate_process(pid: i32) -> bool {
@@ -548,6 +711,8 @@ fn terminate_process(pid: i32) -> bool {
     {
         std::process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
@@ -607,18 +772,79 @@ fn stop_daemon(data_dir: &str) -> i32 {
     1
 }
 
-fn maybe_daemonize(args: &Args, data_dir: &str) {
+fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
+    let pid_path = format!("{}/dutad.pid", data_dir.trim_end_matches('/'));
+    let rpc_reachable = http_health_ready(rpc_addr).unwrap_or(false);
+    let pid_s = match fs::read_to_string(&pid_path) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("dutad: stopped");
+            println!("rpc: {}", rpc_addr);
+            println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+            return 1;
+        }
+    };
+    let pid: i32 = match pid_s.trim().parse() {
+        Ok(p) if p > 1 => p,
+        _ => {
+            let _ = fs::remove_file(&pid_path);
+            println!("dutad: stopped");
+            println!("stale_pid_removed: invalid");
+            println!("rpc: {}", rpc_addr);
+            println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+            return 1;
+        }
+    };
+    if process_exists(pid) {
+        println!("dutad: running");
+        println!("pid: {}", pid);
+        println!("rpc: {}", rpc_addr);
+        println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+        return if rpc_reachable { 0 } else { 1 };
+    }
+    let _ = fs::remove_file(&pid_path);
+    println!("dutad: stopped");
+    println!("stale_pid_removed: {}", pid);
+    println!("rpc: {}", rpc_addr);
+    println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+    1
+}
+
+fn wait_for_daemon_rpc_ready(rpc_addr: &str, child_pid: u32, timeout_ms: u64) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last_err = String::new();
+    while std::time::Instant::now() < deadline {
+        if !process_exists(child_pid as i32) {
+            return Err(format!("daemon_exited_early: pid={}", child_pid));
+        }
+        match http_health_ready(rpc_addr) {
+            Ok(true) => return Ok(()),
+            Ok(false) => last_err = "health_not_ready".to_string(),
+            Err(e) => last_err = e,
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "daemon_not_ready: rpc={} timeout_ms={} last_err={}",
+        rpc_addr, timeout_ms, last_err
+    ))
+}
+
+fn maybe_daemonize(args: &Args, data_dir: &str, rpc_addr: &str) {
     if !args.daemon || args.foreground {
         return;
     }
 
     let exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("dutad: current_exe_failed: {}", e);
+            std::process::exit(1);
+        }
     };
 
-    let debug_log_path = format!("{}/debug.log", data_dir.trim_end_matches('/'));
-    let error_log_path = format!("{}/error.log", data_dir.trim_end_matches('/'));
+    let debug_log_path = format!("{}/dutad.stdout.log", data_dir.trim_end_matches('/'));
+    let error_log_path = format!("{}/dutad.stderr.log", data_dir.trim_end_matches('/'));
     let pid_path = format!("{}/dutad.pid", data_dir.trim_end_matches('/'));
 
     if let Err(e) = fs::create_dir_all(data_dir) {
@@ -675,10 +901,17 @@ fn maybe_daemonize(args: &Args, data_dir: &str) {
     cmd.stderr(std::process::Stdio::from(log_file_err));
 
     match cmd.spawn() {
-        Ok(child) => {
+        Ok(mut child) => {
             if let Err(e) = write_pid_file(&pid_path, child.id()) {
                 eprintln!("dutad: {}", e);
                 let _ = terminate_process(child.id() as i32);
+                std::process::exit(1);
+            }
+            if let Err(e) = wait_for_daemon_rpc_ready(rpc_addr, child.id(), 5000) {
+                let _ = terminate_process(child.id() as i32);
+                let _ = child.wait();
+                let _ = fs::remove_file(&pid_path);
+                eprintln!("dutad: {}", e);
                 std::process::exit(1);
             }
             println!("dutad: started (pid={})", child.id());
@@ -1013,20 +1246,25 @@ fn start_rpc_servers(
     let mining_enabled = mining_addr.is_some();
 
     // Phase 3: optional public mining interface on a separate listener.
-    if let Some(mining_addr) = mining_addr.clone() {
+    let mining_listener = if let Some(mining_addr) = mining_addr.clone() {
+        let mining_server = match tiny_http::Server::http(&mining_addr) {
+            Ok(s) => s,
+            Err(e) => {
+                edlog!("daemon: MINING_BIND_FAIL addr={} err={}", mining_addr, e);
+                return;
+            }
+        };
+        Some((mining_addr, mining_server))
+    } else {
+        None
+    };
+    if let Some((mining_addr, mining_server)) = mining_listener {
         let data_dir2 = data_dir.clone();
         let net_str2 = net_str.clone();
         thread::spawn(move || {
-            let server = match tiny_http::Server::http(&mining_addr) {
-                Ok(s) => s,
-                Err(e) => {
-                    edlog!("daemon: MINING_BIND_FAIL addr={} err={}", mining_addr, e);
-                    return;
-                }
-            };
             dlog!("daemon: MINING_LISTEN addr=http://{} phase=3", mining_addr);
 
-            for request in server.incoming_requests() {
+            for request in mining_server.incoming_requests() {
                 if request.url().len() > MAX_RPC_URL_BYTES {
                     respond_414(request);
                     continue;
@@ -1146,7 +1384,7 @@ fn start_rpc_servers(
                     }
                     let (tip_height, _tip_hash, _tip_cw, _tip_bits) =
                         store::tip_fields(&data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
-                    let best_seen_height = p2p::best_seen_height();
+                    let best_seen_height = p2p::best_seen_height().max(tip_height);
                     let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
                         1.0
                     } else {
@@ -1460,12 +1698,30 @@ fn start_rpc_servers(
                 let target_h = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
 
                 match store::rollback_to_height(&data_dir, target_h) {
-                    Ok(()) => respond_json(
-                        request,
-                        tiny_http::StatusCode(200),
-                        json!({"ok":true,"tip":serde_json::from_str::<serde_json::Value>(&tip_json(&data_dir)).unwrap_or(json!({}))}).to_string(),
-                    ),
-                    Err(e) => respond_error_detail(request, tiny_http::StatusCode(500), "rollback_failed", json!({"detail":e})),
+                    Ok(()) => {
+                        let tip =
+                            serde_json::from_str::<serde_json::Value>(&tip_json(&data_dir))
+                                .unwrap_or(json!({}));
+                        dlog!(
+                            "daemon: ROLLBACK_OK target_height={} new_tip={}",
+                            target_h,
+                            tip
+                        );
+                        respond_json(
+                            request,
+                            tiny_http::StatusCode(200),
+                            json!({"ok":true,"tip":tip}).to_string(),
+                        )
+                    }
+                    Err(e) => {
+                        edlog!("daemon: ROLLBACK_FAIL target_height={} err={}", target_h, e);
+                        respond_error_detail(
+                            request,
+                            tiny_http::StatusCode(500),
+                            "rollback_failed",
+                            json!({"detail":e}),
+                        )
+                    }
                 }
             }
 
@@ -1516,12 +1772,29 @@ fn start_rpc_servers(
                 let keep_last = v.get("keep_last").and_then(|x| x.as_u64()).unwrap_or(2000);
 
                 match store::prune(&data_dir, keep_last) {
-                    Ok(()) => respond_json(
-                        request,
-                        tiny_http::StatusCode(200),
-                        json!({"ok":true,"keep_last":keep_last,"prune_below": store::prune_below(&data_dir)}).to_string(),
-                    ),
-                    Err(e) => respond_error_detail(request, tiny_http::StatusCode(500), "prune_failed", json!({"detail":e})),
+                    Ok(()) => {
+                        let prune_below = store::prune_below(&data_dir);
+                        dlog!(
+                            "daemon: PRUNE_OK keep_last={} prune_below={}",
+                            keep_last,
+                            prune_below
+                        );
+                        respond_json(
+                            request,
+                            tiny_http::StatusCode(200),
+                            json!({"ok":true,"keep_last":keep_last,"prune_below": prune_below})
+                                .to_string(),
+                        )
+                    }
+                    Err(e) => {
+                        edlog!("daemon: PRUNE_FAIL keep_last={} err={}", keep_last, e);
+                        respond_error_detail(
+                            request,
+                            tiny_http::StatusCode(500),
+                            "prune_failed",
+                            json!({"detail":e}),
+                        )
+                    }
                 }
             }
 
@@ -1559,6 +1832,7 @@ fn main() {
     }));
 
     let args = Args::parse();
+    let stop_requested = args.stop || matches!(args.command, Some(Cmd::Stop));
     let cli_net = if args.stagenet {
         Some(Network::Stagenet)
     } else if args.testnet {
@@ -1662,7 +1936,7 @@ fn main() {
         }
     }
 
-    if args.stop {
+    if stop_requested {
         if args.daemon {
             eprintln!("dutad: --stop cannot be combined with --daemon");
             std::process::exit(1);
@@ -1670,8 +1944,6 @@ fn main() {
         let rc = stop_daemon(&data_dir);
         std::process::exit(rc);
     }
-
-    maybe_daemonize(&args, &data_dir);
 
     // Bootstrap peers precedence: CLI --seeds > env DUTA_P2P_SEEDS > config (seeds/addnode) > built-in cluster.
     let mut seeds: Vec<String> = args
@@ -1749,7 +2021,7 @@ fn main() {
     let rpc_addr = format!("{}:{}", rpc_bind, net.default_daemon_rpc_port());
 
     // Public mining bind (locked port). CLI overrides config.
-    let mut mining_addr = args.mining_bind;
+    let mut mining_addr = args.mining_bind.clone();
     if mining_addr.is_none() {
         if let Some(b) = conf
             .get_last("mining_bind")
@@ -1768,6 +2040,15 @@ fn main() {
             }
         }
     }
+    if matches!(args.command, Some(Cmd::Status)) {
+        if args.daemon {
+            eprintln!("dutad: status cannot be combined with --daemon");
+            std::process::exit(1);
+        }
+        let rc = daemon_status(&data_dir, &rpc_addr);
+        std::process::exit(rc);
+    }
+    maybe_daemonize(&args, &data_dir, &rpc_addr);
 
     // Ensure data dir has an explicit schema/network marker before touching DB.
     if let Err(e) = store::ensure_datadir_meta(&data_dir, &net_str) {
@@ -1777,20 +2058,29 @@ fn main() {
         );
         std::process::exit(1);
     }
-    // Initialize debug.log + error.log in datadir.
+    // Initialize stdout/stderr log files in datadir.
     if let Err(e) = debuglog::init(&data_dir) {
         eprintln!("daemon: LOG_INIT_FAIL data={} err={}", data_dir, e);
     }
     rpc_json::mark_process_start();
 
-    // DB bootstrap (best-effort import from chain.json if DB empty)
+    // DB bootstrap must fail closed for release builds. If legacy import or DB init
+    // returns an error, continuing with listeners up would mislead operators about
+    // chain readiness and can mask on-disk corruption or invalid bootstrap state.
     if let Err(e) = store::bootstrap(&data_dir) {
         edlog!("daemon: BOOTSTRAP_FAIL data={} err={}", data_dir, e);
+        eprintln!("daemon: BOOTSTRAP_FAIL data={} err={}", data_dir, e);
+        std::process::exit(1);
     }
 
     let mining_log = mining_addr.as_deref().unwrap_or("-");
+    print_startup_banner(net, &data_dir, &p2p_addr, &rpc_addr, mining_addr.as_deref());
+    println!("Step       : data directory ready");
+    println!("Step       : chain bootstrap completed");
+    print_chain_status(&data_dir);
+    println!("Step       : starting RPC and P2P listeners");
     dlog!(
-        "daemon: START net={} data={} p2p={} rpc={} mining={} debug_log={}/debug.log error_log={}/error.log",
+        "daemon: START net={} data={} p2p={} rpc={} mining={} stdout_log={}/dutad.stdout.log stderr_log={}/dutad.stderr.log",
         net.as_str(),
         data_dir,
         p2p_addr,
@@ -1814,7 +2104,7 @@ fn main() {
         || std::env::var("DUTA_ENABLE_ROLLBACK")
             .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
-    thread::spawn(move || {
+    let rpc_thread = thread::spawn(move || {
         start_rpc_servers(
             rpc_addr_for_thread,
             mining_addr_for_thread,
@@ -1828,18 +2118,43 @@ fn main() {
     let p2p_addr_for_thread = p2p_addr.clone();
     let data_for_p2p = data_dir.clone();
     let net_for_p2p = net_str.clone();
-    thread::spawn(move || p2p::start_p2p(p2p_addr_for_thread, data_for_p2p, net_for_p2p, seeds));
+    let p2p_thread =
+        thread::spawn(move || p2p::start_p2p(p2p_addr_for_thread, data_for_p2p, net_for_p2p, seeds));
+    print_startup_guidance(&rpc_addr);
 
-    // Keep process alive.
+    let data_for_status = data_dir.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(30));
+        print_runtime_status_tick(&data_for_status);
+    });
+
+    // Keep process alive, but fail closed if a critical service thread exits.
     loop {
-        thread::sleep(Duration::from_secs(3600));
+        thread::sleep(Duration::from_secs(1));
+        if rpc_thread.is_finished() {
+            let outcome = rpc_thread.join();
+            match outcome {
+                Ok(()) => edlog!("daemon: rpc thread exited unexpectedly"),
+                Err(_) => edlog!("daemon: rpc thread panicked"),
+            }
+            std::process::exit(1);
+        }
+        if p2p_thread.is_finished() {
+            let outcome = p2p_thread.join();
+            match outcome {
+                Ok(()) => edlog!("daemon: p2p thread exited unexpectedly"),
+                Err(_) => edlog!("daemon: p2p thread panicked"),
+            }
+            std::process::exit(1);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_path_requires_loopback, blocks_from_json, ip_is_loopback_or_private, ChainBlock};
+    use super::{admin_path_requires_loopback, blocks_from_json, ip_is_loopback_or_private, Args, ChainBlock};
     use crate::store;
+    use clap::Parser;
     use serde_json::json;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -1927,5 +2242,19 @@ mod tests {
 
         let out = blocks_from_json(&data_dir, 0, 10).expect("json body");
         assert_eq!(out, "[]");
+    }
+
+    #[test]
+    fn stop_subcommand_is_parsed_for_operator_ux() {
+        let args = Args::parse_from(["dutad", "stop"]);
+        assert!(matches!(args.command, Some(super::Cmd::Stop)));
+        assert!(!args.stop);
+    }
+
+    #[test]
+    fn status_subcommand_is_parsed_for_operator_ux() {
+        let args = Args::parse_from(["dutad", "status"]);
+        assert!(matches!(args.command, Some(super::Cmd::Status)));
+        assert!(!args.stop);
     }
 }
