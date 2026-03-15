@@ -18,10 +18,10 @@ use std::net::{Shutdown, TcpStream};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use duta_core::{dutahash, types::H32};
@@ -86,6 +86,36 @@ struct WorkResp {
 
     timestamp: u64,
     expires_at: u64,
+}
+
+static WORK_REJECT_LOG_STATE: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
+const WORK_REJECT_LOG_INTERVAL_SECS: u64 = 15;
+
+fn work_reject_log_state() -> &'static Mutex<Option<(String, Instant)>> {
+    WORK_REJECT_LOG_STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn log_work_reject_once(message: &str) {
+    let now = Instant::now();
+    let mut state = match work_reject_log_state().lock() {
+        Ok(g) => g,
+        Err(_) => {
+            eprintln!("{message}");
+            return;
+        }
+    };
+    match state.as_ref() {
+        Some((last_msg, last_at))
+            if last_msg == message
+                && now.duration_since(*last_at) < Duration::from_secs(WORK_REJECT_LOG_INTERVAL_SECS) =>
+        {
+            return;
+        }
+        _ => {
+            *state = Some((message.to_string(), now));
+            eprintln!("{message}");
+        }
+    }
 }
 
 const MIN_POLL_MS: u64 = 50;
@@ -471,18 +501,21 @@ fn explain_work_fetch_reject(http_code: Option<u16>, body: &str) {
     let detail = v.get("detail").map(|x| x.to_string()).unwrap_or_default();
     match err {
         "launch_guard_not_ready" => {
-            let _ = detail;
-            eprintln!("work update pending: waiting for network tip to settle");
+            let msg = if detail.contains("launch_guard_solo_bootstrap") {
+                "solo mining is temporarily limited during early launch"
+            } else {
+                "work update pending: waiting for network tip to settle"
+            };
+            log_work_reject_once(msg);
         }
         "syncing" => {
-            let _ = detail;
-            eprintln!("work update pending: waiting for node sync");
+            log_work_reject_once("work update pending: waiting for node sync");
         }
         "busy" => {
-            eprintln!("work update pending: node busy, retrying");
+            log_work_reject_once("work update pending: node busy, retrying");
         }
         "too_many_outstanding_work" => {
-            eprintln!("work update pending: miner queue is full, retrying");
+            log_work_reject_once("work update pending: miner queue is full, retrying");
         }
         _ => {
             eprintln!("work fetch http_code={} error={} detail={}", code, err, detail);
