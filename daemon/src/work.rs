@@ -213,6 +213,15 @@ pub(crate) fn build_work_template(
             tip_h, best_h
         ));
     }
+    let hard_launch_guard_active =
+        net == Network::Mainnet && netparams::pow_launch_guard_enabled(net, tip_h + 1, 0);
+    if !official_pool_bypass && hard_launch_guard_active {
+        return Err(format!(
+            "launch_guard_solo_bootstrap tip_height={} next_height={}",
+            tip_h,
+            tip_h + 1
+        ));
+    }
     if !official_pool_bypass {
         p2p::launch_guard_mining_ready(net, tip_h)?;
     }
