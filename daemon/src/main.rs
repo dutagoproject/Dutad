@@ -1169,7 +1169,17 @@ fn tip_json(data_dir: &str) -> String {
         0,
     ));
 
-    let target_block_time_secs: u64 = 30;
+    let target_block_time_secs = duta_core::netparams::pow_target_secs(
+        crate::store::read_datadir_network(data_dir).unwrap_or_else(|| {
+            if data_dir.contains("testnet") {
+                Network::Testnet
+            } else if data_dir.contains("stagenet") {
+                Network::Stagenet
+            } else {
+                Network::Mainnet
+            }
+        }),
+    );
 
     let avg_bt = avg_block_time_secs_from_db(data_dir, 30).unwrap_or(target_block_time_secs);
     let difficulty: u128 = expected_hashes(bits as u32).unwrap_or(0);
