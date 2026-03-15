@@ -471,19 +471,18 @@ fn explain_work_fetch_reject(http_code: Option<u16>, body: &str) {
     let detail = v.get("detail").map(|x| x.to_string()).unwrap_or_default();
     match err {
         "launch_guard_not_ready" => {
-            eprintln!(
-                "work rejected: launch guard active; node is not aligned with official backbone yet detail={}",
-                detail
-            );
+            let _ = detail;
+            eprintln!("work update pending: waiting for network tip to settle");
         }
         "syncing" => {
-            eprintln!("work rejected: node syncing detail={}", detail);
+            let _ = detail;
+            eprintln!("work update pending: waiting for node sync");
         }
         "busy" => {
-            eprintln!("work rejected: node busy");
+            eprintln!("work update pending: node busy, retrying");
         }
         "too_many_outstanding_work" => {
-            eprintln!("work rejected: too many outstanding work items for this miner");
+            eprintln!("work update pending: miner queue is full, retrying");
         }
         _ => {
             eprintln!("work fetch http_code={} error={} detail={}", code, err, detail);
