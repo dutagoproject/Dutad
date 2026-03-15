@@ -83,7 +83,7 @@ pub const DEVFEE_BPS: u64 = DEVFEE_BPS_YEAR1;
 pub const DEV_FEE_BPS: u64 = DEVFEE_BPS;
 
 pub const DEVFEE_ADDRS_MAINNET: [&str; 1] = [
-    "dut34eb9f0d0d9e0ec7fbf78e6bfc7277f10f01aaf9",
+    "dut3ed5b614170366a0d16242504c12c16cd6537925",
 ];
 pub const DEVFEE_ADDRS_TESTNET: [&str; 3] = [
     "test36b504b446742162d52f5d666fc4780c2d4ae740",
@@ -127,7 +127,7 @@ pub fn devfee_bps(net: Network, height: u64) -> u64 {
 }
 
 pub const GENESIS_HASH_MAINNET: &str =
-    "0008c26776cfcbf687337657bf9cf534aa7c2bdc97d7e4ec1be9aecba1f2affd";
+    "000ccffedbff23d49e96f0db60122798c0ba46a5839fb6b256e7404972fbf85a";
 pub const GENESIS_HASH_TESTNET: &str =
     "005e7ac709497090e6ea26729feeb6e43b55ef79be080620d3f4a2fb25ec771e";
 pub const GENESIS_HASH_STAGENET: &str =
@@ -175,7 +175,7 @@ pub fn pow_max_bits(_net: Network) -> u64 {
 
 pub fn pow_launch_guard_until_height(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 300,
+        Network::Mainnet => 2000,
         Network::Testnet | Network::Stagenet => 0,
     }
 }
@@ -345,7 +345,8 @@ mod tests {
     #[test]
     fn launch_guard_is_mainnet_only() {
         assert!(pow_launch_guard_enabled(Network::Mainnet, 1, 12));
-        assert!(!pow_launch_guard_enabled(Network::Mainnet, 301, 12));
+        assert!(pow_launch_guard_enabled(Network::Mainnet, 2000, 12));
+        assert!(!pow_launch_guard_enabled(Network::Mainnet, 2001, 12));
         assert!(!pow_launch_guard_enabled(Network::Mainnet, 1, 22));
         assert!(!pow_launch_guard_enabled(Network::Testnet, 1, 8));
         assert!(!pow_launch_guard_enabled(Network::Stagenet, 1, 10));
