@@ -31,7 +31,7 @@ cargo --version
 From the repository root:
 
 ```bash
-cargo build
+./scripts/build-linux.sh
 ```
 
 Run tests:
@@ -40,35 +40,20 @@ Run tests:
 cargo test
 ```
 
-## Build release binaries
-
-```bash
-cargo build --release
-```
-
 The release binaries will be in `target/release/`.
-
-If you want a packaged release bundle with checksums and a manifest for the service binaries:
-
-```bash
-chmod +x ./tools/build_release_bundle.sh
-./tools/build_release_bundle.sh 0.0.1-beta
-```
-
-For the full release flow, see [Release on Linux](RELEASE_LINUX.md).
 
 ## Run the main services
 
 Run the node:
 
 ```bash
-cargo run -p dutad -- --datadir ./data/mainnet
+./scripts/run-node-mining.sh ./data/mainnet 127.0.0.1:19085
 ```
 
 Run the solo miner:
 
 ```bash
-cargo run -p dutad --bin dutaminer -- --rpc http://127.0.0.1:19085 --address YOUR_DUTA_ADDRESS --threads 8
+./scripts/mine-solo.sh http://127.0.0.1:19085 YOUR_DUTA_ADDRESS 8
 ```
 
 ## Important

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.0.1-beta}"
+VERSION="${1:-1.0.0}"
 TARGET_TRIPLE="${2:-x86_64-unknown-linux-gnu}"
 OUTPUT_ROOT="${3:-dist}"
 

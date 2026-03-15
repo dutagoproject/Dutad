@@ -28,12 +28,12 @@ On Linux:
 sha256sum -c sha256sums.txt
 ```
 
-On Windows PowerShell:
+On Windows:
 
-```powershell
-Get-FileHash .\dutad.exe -Algorithm SHA256
-Get-FileHash .\duta-cli.exe -Algorithm SHA256
-Get-FileHash .\dutaminer.exe -Algorithm SHA256
+```bat
+certutil -hashfile dutad.exe SHA256
+certutil -hashfile duta-cli.exe SHA256
+certutil -hashfile dutaminer.exe SHA256
 ```
 
 Compare the output to `sha256sums.txt`.
@@ -43,8 +43,8 @@ Compare the output to `sha256sums.txt`.
 Extract the archive:
 
 ```bash
-tar -xzf duta-release-0.0.1-beta-linux-x86_64.tar.gz
-cd duta-release-0.0.1-beta-linux-x86_64
+tar -xzf duta-release-1.0.0-linux-x86_64.tar.gz
+cd duta-release-1.0.0-linux-x86_64
 ```
 
 Install the binaries:
@@ -75,10 +75,10 @@ C:\DUTA
 
 You can test the binaries directly:
 
-```powershell
-.\dutad.exe --help
-.\duta-cli.exe --help
-.\dutaminer.exe --help
+```bat
+dutad.exe --help
+duta-cli.exe --help
+dutaminer.exe --help
 ```
 
 ## Suggested layout
@@ -102,6 +102,6 @@ C:\DUTA\dutaminer.exe
 
 ## Important notes
 
-- this is still a beta release
+- use only binaries that match the final mainnet release
 - keep daemon admin RPC local-only
 - expose the mining port only if you mean to serve external miners

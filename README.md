@@ -4,7 +4,7 @@
 
 It contains the chain-critical parts of the project: consensus rules, block and transaction validation, storage, daemon RPC, P2P networking, and the built-in solo mining flow.
 
-Current release line: `0.0.1-beta`
+Current release line: `1.0.0`
 
 Website: https://dutago.xyz
 
@@ -44,6 +44,11 @@ From the repository root:
 cargo build
 cargo build --release
 ```
+
+Quick helpers:
+
+- Windows: `scripts\\build-windows.cmd`
+- Linux: `./scripts/build-linux.sh`
 
 ## Release position
 
