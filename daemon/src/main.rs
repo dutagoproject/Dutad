@@ -55,7 +55,7 @@ fn console_line(tag: &str, color: &str, value: impl AsRef<str>) {
 #[command(
     name = "dutad",
     version,
-    about = "DUTA daemon (Rust skeleton)",
+    about = "DUTA full node daemon",
     after_help = "Examples:\n  dutad --daemon\n  dutad status\n  dutad stop\n  duta-cli getpeerinfo\n  duta-cli listbanned\n  duta-cli banpeer 203.0.113.10 launch_abuse\n  duta-cli unbanpeer 203.0.113.10\n  dutad --testnet --daemon"
 )]
 struct Args {
@@ -90,7 +90,7 @@ struct Args {
     #[arg(long)]
     stagenet: bool,
 
-    /// Bind address for daemon RPC (default: 127.0.0.1). For LAN testing, set to CT IP (e.g. 172.16.40.254).
+    /// Bind address for daemon RPC (default: 127.0.0.1). Admin RPC is loopback-only in release builds.
     #[arg(long)]
     rpc_bind: Option<String>,
 
