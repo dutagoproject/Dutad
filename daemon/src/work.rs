@@ -7,6 +7,7 @@ use duta_core::types::H32;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -181,6 +182,7 @@ fn compact_hex_from_leading_zero_bits(bits: u64) -> String {
 pub(crate) fn build_work_template(
     data_dir: &str,
     miner: &str,
+    official_pool_bypass: bool,
 ) -> Result<serde_json::Value, String> {
     let miner = miner.trim();
     if miner.is_empty() {
@@ -211,7 +213,9 @@ pub(crate) fn build_work_template(
             tip_h, best_h
         ));
     }
-    p2p::launch_guard_mining_ready(net, tip_h)?;
+    if !official_pool_bypass {
+        p2p::launch_guard_mining_ready(net, tip_h)?;
+    }
 
     let height = tip_h + 1;
     let prevhash32 = tip_hash32;
@@ -356,6 +360,23 @@ pub(crate) fn build_work_template(
     }))
 }
 
+fn request_is_official_pool_work(request: &tiny_http::Request) -> bool {
+    let source_ok = request.headers().iter().any(|h| {
+        h.field.equiv("X-DUTA-Work-Source")
+            && h.value.as_str().eq_ignore_ascii_case("official-stratum")
+    });
+    if !source_ok {
+        return false;
+    }
+    request
+        .remote_addr()
+        .map(|addr| match addr.ip() {
+            IpAddr::V4(v4) => v4.is_loopback(),
+            IpAddr::V6(v6) => v6.is_loopback(),
+        })
+        .unwrap_or(false)
+}
+
 pub fn handle_work(
     request: tiny_http::Request,
     data_dir: &str,
@@ -377,7 +398,8 @@ pub fn handle_work(
         miner_p
     };
 
-    let tpl = match build_work_template(data_dir, &miner) {
+    let official_pool_bypass = request_is_official_pool_work(&request);
+    let tpl = match build_work_template(data_dir, &miner, official_pool_bypass) {
         Ok(v) => v,
         Err(e) if e == "missing_address" => json!({"ok":false,"error":"missing_address"}),
         Err(e) if e == "invalid_address" => json!({"ok":false,"error":"invalid_address"}),
@@ -555,7 +577,8 @@ mod tests {
         let data_dir = p.to_string_lossy().to_string();
         store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
         let err =
-            super::build_work_template(&data_dir, netparams::DEVFEE_ADDRS_TESTNET[0]).unwrap_err();
+            super::build_work_template(&data_dir, netparams::DEVFEE_ADDRS_TESTNET[0], false)
+                .unwrap_err();
         assert_eq!(err, "miner_address_conflicts_with_devfee");
     }
 }
