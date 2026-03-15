@@ -1,6 +1,7 @@
 use crate::store;
 use crate::submit_tx;
 use crate::{blocks_from_json, ChainBlock};
+use duta_core::netparams::{self, Network};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -160,6 +161,150 @@ fn bootstrap_has_healthy_peer() -> bool {
         }
     }
     false
+}
+
+fn launch_guard_backbone_targets(net: Network) -> Vec<String> {
+    let port = net.default_p2p_port();
+    net.default_seed_hosts()
+        .iter()
+        .map(|host: &&str| format!("{}:{}", host.to_ascii_lowercase(), port))
+        .collect()
+}
+
+fn launch_guard_active_for_height(net: Network, tip_height: u64) -> bool {
+    let next_height = tip_height.saturating_add(1);
+    netparams::pow_launch_guard_enabled(net, next_height, 0)
+}
+
+fn launch_guard_unhealthy(net: Network, tip_height: u64) -> bool {
+    let best_h = best_seen_height();
+    if best_h > tip_height.saturating_add(1) {
+        return true;
+    }
+    let backbone_peers = launch_guard_backbone_peer_count(net);
+    if backbone_peers < launch_guard_min_backbone_peers(net) {
+        return true;
+    }
+    let backbone_heights = launch_guard_backbone_heights(net);
+    backbone_heights.iter().any(|height| *height != tip_height)
+}
+
+fn launch_guard_active_now() -> bool {
+    let Some(cfg) = cfg() else {
+        return false;
+    };
+    let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
+    let (tip_height, _, _, _) = tip_fields(&cfg.data_dir);
+    launch_guard_active_for_height(net, tip_height) || launch_guard_unhealthy(net, tip_height)
+}
+
+fn is_launch_backbone_peer_for_net(net: Network, addr: &str) -> bool {
+    let addr = addr.trim().to_ascii_lowercase();
+    launch_guard_backbone_targets(net)
+        .into_iter()
+        .any(|candidate| candidate == addr)
+}
+
+fn launch_guard_backbone_peer_count(net: Network) -> usize {
+    let expected: HashSet<String> = launch_guard_backbone_targets(net).into_iter().collect();
+    if expected.is_empty() {
+        return 0;
+    }
+    let now = Instant::now();
+    match state().outbound_recent.lock() {
+        Ok(peers) => peers
+            .values()
+            .filter(|peer| {
+                peer.success_count > 0
+                    && now.duration_since(peer.last_seen_at) <= Duration::from_secs(300)
+                    && expected.contains(&peer.addr.to_ascii_lowercase())
+            })
+            .count(),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .values()
+            .filter(|peer| {
+                peer.success_count > 0
+                    && now.duration_since(peer.last_seen_at) <= Duration::from_secs(300)
+                    && expected.contains(&peer.addr.to_ascii_lowercase())
+            })
+            .count(),
+    }
+}
+
+fn launch_guard_min_backbone_peers(net: Network) -> usize {
+    match net {
+        Network::Mainnet => 2,
+        Network::Testnet | Network::Stagenet => 0,
+    }
+}
+
+fn launch_guard_backbone_heights(net: Network) -> Vec<u64> {
+    let expected: HashSet<String> = launch_guard_backbone_targets(net).into_iter().collect();
+    if expected.is_empty() {
+        return Vec::new();
+    }
+    let now = Instant::now();
+    match state().outbound_recent.lock() {
+        Ok(peers) => peers
+            .values()
+            .filter(|peer| {
+                peer.success_count > 0
+                    && now.duration_since(peer.last_seen_at) <= Duration::from_secs(300)
+                    && expected.contains(&peer.addr.to_ascii_lowercase())
+            })
+            .map(|peer| peer.last_tip_height)
+            .collect(),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .values()
+            .filter(|peer| {
+                peer.success_count > 0
+                    && now.duration_since(peer.last_seen_at) <= Duration::from_secs(300)
+                    && expected.contains(&peer.addr.to_ascii_lowercase())
+            })
+            .map(|peer| peer.last_tip_height)
+            .collect(),
+    }
+}
+
+pub fn launch_guard_mining_ready(net: Network, tip_height: u64) -> Result<(), String> {
+    if net != Network::Mainnet {
+        return Ok(());
+    }
+    let hard_guard = launch_guard_active_for_height(net, tip_height);
+    let best_h = best_seen_height();
+    let syncing = best_h > tip_height.saturating_add(1);
+    let backbone_peers = launch_guard_backbone_peer_count(net);
+    let min_backbone_peers = launch_guard_min_backbone_peers(net);
+    let insufficient_backbone = backbone_peers < min_backbone_peers;
+    let backbone_heights = launch_guard_backbone_heights(net);
+    let height_mismatch = backbone_heights.iter().any(|height| *height != tip_height);
+
+    if !(hard_guard || syncing || insufficient_backbone || height_mismatch) {
+        return Ok(());
+    }
+    if syncing {
+        return Err(format!(
+            "launch_guard_syncing tip_height={} best_seen_height={}",
+            tip_height, best_h
+        ));
+    }
+    if insufficient_backbone {
+        return Err(format!(
+            "launch_guard_official_peer_insufficient tip_height={} best_seen_height={} official_backbone_peers={} required_backbone_peers={}",
+            tip_height, best_h, backbone_peers, min_backbone_peers
+        ));
+    }
+    if height_mismatch {
+        let min_height = backbone_heights.iter().copied().min().unwrap_or(0);
+        let max_height = backbone_heights.iter().copied().max().unwrap_or(0);
+        return Err(format!(
+            "launch_guard_official_height_mismatch tip_height={} official_min_height={} official_max_height={} official_backbone_peers={}",
+            tip_height, min_height, max_height, backbone_peers
+        ));
+    }
+    Ok(())
 }
 
 fn log_dial_failed(addr: &str, err: &str) {
@@ -330,6 +475,19 @@ pub fn p2p_public_info() -> serde_json::Value {
     let st = state();
     let connections = st.inbound_total.load(Ordering::Relaxed) as u64;
     let best_h = best_seen_height();
+    let launch_cfg = cfg()
+        .map(|c| Network::parse_name(&c.net).unwrap_or(Network::Mainnet))
+        .unwrap_or(Network::Mainnet);
+    let (tip_h, _, _, _) = cfg()
+        .map(|c| tip_fields(&c.data_dir))
+        .unwrap_or((0, "0".repeat(64), 0, 0));
+    let launch_backbone_peers = launch_guard_backbone_peer_count(launch_cfg) as u64;
+    let launch_backbone_heights = launch_guard_backbone_heights(launch_cfg);
+    let launch_required_backbone_peers = launch_guard_min_backbone_peers(launch_cfg) as u64;
+    let launch_guard_hard_active = launch_guard_active_for_height(launch_cfg, tip_h);
+    let launch_guard_unhealthy_now = launch_guard_unhealthy(launch_cfg, tip_h);
+    let launch_guard_active = launch_guard_hard_active || launch_guard_unhealthy_now;
+    let launch_guard_detail = launch_guard_mining_ready(launch_cfg, tip_h).err();
 
     let bans = list_banned_entries();
     let ban_count = bans.len() as u64;
@@ -413,6 +571,14 @@ pub fn p2p_public_info() -> serde_json::Value {
     json!({
         "connections": connections,
         "best_seen_height": best_h,
+        "launch_guard_active": launch_guard_active,
+        "launch_guard_hard_active": launch_guard_hard_active,
+        "launch_guard_unhealthy": launch_guard_unhealthy_now,
+        "launch_guard_tip_height": tip_h,
+        "launch_guard_required_backbone_peers": launch_required_backbone_peers,
+        "launch_guard_backbone_peers": launch_backbone_peers,
+        "launch_guard_backbone_heights": launch_backbone_heights,
+        "launch_guard_detail": launch_guard_detail,
         "ban_count": ban_count,
         "bans": bans,
         "seed_count": seed_count,
@@ -1006,6 +1172,12 @@ fn outbound_peer_skip_reason(peer: &PeerSnapshot) -> Option<&'static str> {
 }
 
 fn outbound_peer_should_skip(addr: &str) -> Option<String> {
+    if let Some(cfg) = cfg() {
+        let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
+        if launch_guard_active_now() && is_launch_backbone_peer_for_net(net, addr) {
+            return None;
+        }
+    }
     let peers = match state().outbound_recent.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -1069,12 +1241,20 @@ fn select_outbound_targets(
 }
 
 fn outbound_quarantined_peers_json() -> Vec<serde_json::Value> {
+    let guarded_net = cfg()
+        .and_then(|cfg| Network::parse_name(&cfg.net))
+        .filter(|_| launch_guard_active_now());
     let peers = match state().outbound_recent.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
     let mut out: Vec<(PeerSnapshot, &'static str)> = peers
         .values()
+        .filter(|peer| {
+            guarded_net
+                .map(|net| !is_launch_backbone_peer_for_net(net, &peer.addr))
+                .unwrap_or(true)
+        })
         .filter_map(|peer| outbound_peer_skip_reason(peer).map(|reason| (peer.clone(), reason)))
         .collect();
     out.sort_by_key(|(peer, _)| std::cmp::Reverse(peer.last_seen_at));
@@ -1555,14 +1735,24 @@ fn validate_blocks_from(
     Ok(ok)
 }
 
-fn penalize_bad_blocks(peer: &str, peer_ip: IpAddr, err: &str) {
+fn penalize_bad_blocks(peer: &str, peer_ip: IpAddr, err: &str, net: &str, data_dir: &str) {
     // Private mesh peers can legitimately race during catch-up and briefly send
     // stale/out-of-order blocks after we have already requested a resync.
     // Treat those as recovery noise, not hostile misbehavior, or clustered
     // launch nodes will end up temp-banning each other under burst mining.
-    if ip_is_loopback_or_private(peer_ip) && err.contains("stale_or_out_of_order_block") {
+    let guarded_seed_recovery = err.contains("stale_or_out_of_order_block")
+        && Network::parse_name(net)
+            .map(|network| {
+                let (tip_height, _, _, _) = tip_fields(data_dir);
+                launch_guard_active_for_height(network, tip_height)
+                    && is_launch_backbone_peer_for_net(network, peer)
+            })
+            .unwrap_or(false);
+    if (ip_is_loopback_or_private(peer_ip) || guarded_seed_recovery)
+        && err.contains("stale_or_out_of_order_block")
+    {
         dlog!(
-            "p2p: reject blocks peer={} ip={} err={} action=ignore_penalty_private_resync",
+            "p2p: reject blocks peer={} ip={} err={} action=ignore_penalty_launch_recovery",
             peer,
             peer_ip,
             err
@@ -1941,7 +2131,7 @@ fn handle_peer(
                             match try_append_blocks(&data_dir, slice) {
                                 Ok(n) => n,
                                 Err(e) => {
-                                    penalize_bad_blocks(&peer, peer_ip, &e);
+                                    penalize_bad_blocks(&peer, peer_ip, &e, &net, &data_dir);
                                     if is_banned(peer_ip) {
                                         break;
                                     }
@@ -1971,7 +2161,7 @@ fn handle_peer(
                                     let n = match try_append_blocks(&data_dir, slice) {
                                         Ok(n) => n,
                                         Err(e) => {
-                                            penalize_bad_blocks(&peer, peer_ip, &e);
+                                            penalize_bad_blocks(&peer, peer_ip, &e, &net, &data_dir);
                                             if is_banned(peer_ip) {
                                                 break;
                                             }
@@ -2061,7 +2251,7 @@ fn handle_peer(
                                 let appended = match try_append_blocks(&data_dir, &one) {
                                     Ok(n) => n,
                                     Err(e) => {
-                                        penalize_bad_blocks(&peer, peer_ip, &e);
+                                        penalize_bad_blocks(&peer, peer_ip, &e, &net, &data_dir);
                                         if is_banned(peer_ip) {
                                             break;
                                         }
@@ -2153,7 +2343,7 @@ fn handle_peer(
                             match try_append_blocks(&data_dir, std::slice::from_ref(&block)) {
                                 Ok(n) => n,
                                 Err(e) => {
-                                    penalize_bad_blocks(&peer, peer_ip, &e);
+                                    penalize_bad_blocks(&peer, peer_ip, &e, &net, &data_dir);
                                     if is_banned(peer_ip) {
                                         break;
                                     }
@@ -2673,12 +2863,31 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 mod tests {
     use super::{
         ban_peer_manual, canonicalize_peer_token, is_transient_dial_error, list_banned_json,
-        normalize_bootstrap_candidates, parse_peers_text, read_line_limited, reorg_overlap_from,
-        should_accept_reorg_candidate, subnet24_key, unban_peer_manual, validate_block_basic,
+        launch_guard_mining_ready, normalize_bootstrap_candidates, parse_peers_text,
+        read_line_limited, reorg_overlap_from, should_accept_reorg_candidate, subnet24_key,
+        unban_peer_manual, validate_block_basic,
         MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
+    use duta_core::netparams::Network;
     use std::io::{BufReader, Cursor};
+    use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, OnceLock};
+
+    fn launch_guard_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn clear_test_peer_state() {
+        super::BEST_SEEN_HEIGHT.store(0, Ordering::Relaxed);
+        if let Ok(mut peers) = super::state().outbound_recent.lock() {
+            peers.clear();
+        }
+        if let Ok(mut peers) = super::state().inbound_live.lock() {
+            peers.clear();
+        }
+    }
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
@@ -2822,5 +3031,59 @@ mod tests {
         let list = list_banned_json();
         let arr = list.as_array().cloned().unwrap_or_default();
         assert!(!arr.iter().any(|v| v.get("ip").and_then(|x| x.as_str()) == Some("203.0.113.9")));
+    }
+
+    #[test]
+    fn launch_guard_requires_official_backbone_peer_on_mainnet() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        let err = launch_guard_mining_ready(Network::Mainnet, 50).unwrap_err();
+        assert!(err.starts_with("launch_guard_official_peer_insufficient"));
+    }
+
+    #[test]
+    fn launch_guard_accepts_recent_official_backbone_peer_on_mainnet() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result("seed1.dutago.xyz:19082", true, Some(50), None);
+        let err = launch_guard_mining_ready(Network::Mainnet, 50).unwrap_err();
+        assert!(err.contains("official_backbone_peers=1"));
+        super::note_outbound_peer_result("seed2.dutago.xyz:19082", true, Some(50), None);
+        let ready = launch_guard_mining_ready(Network::Mainnet, 50);
+        assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
+    }
+
+    #[test]
+    fn launch_guard_rejects_official_backbone_height_mismatch() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result("seed1.dutago.xyz:19082", true, Some(50), None);
+        super::note_outbound_peer_result("seed2.dutago.xyz:19082", true, Some(51), None);
+        let err = launch_guard_mining_ready(Network::Mainnet, 50).unwrap_err();
+        assert!(err.starts_with("launch_guard_official_height_mismatch"));
+    }
+
+    #[test]
+    fn launch_guard_is_inactive_after_guard_window() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::BEST_SEEN_HEIGHT.store(2000, Ordering::Relaxed);
+        super::note_outbound_peer_result("seed1.dutago.xyz:19082", true, Some(2000), None);
+        super::note_outbound_peer_result("seed2.dutago.xyz:19082", true, Some(2000), None);
+        let ready = launch_guard_mining_ready(Network::Mainnet, 2000);
+        assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
+    }
+
+    #[test]
+    fn launch_guard_stays_active_after_guard_window_if_network_is_unhealthy() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::BEST_SEEN_HEIGHT.store(2050, Ordering::Relaxed);
+        super::note_outbound_peer_result("seed1.dutago.xyz:19082", true, Some(2050), None);
+        let err = launch_guard_mining_ready(Network::Mainnet, 2000).unwrap_err();
+        assert!(
+            err.starts_with("launch_guard_syncing")
+                || err.starts_with("launch_guard_official_peer_insufficient")
+        );
     }
 }

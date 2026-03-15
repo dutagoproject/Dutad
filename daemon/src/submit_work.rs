@@ -109,6 +109,8 @@ fn extract_u64_field(s: &str, key: &str) -> Option<u64> {
 fn canonical_submit_reason(detail: &str) -> &'static str {
     if detail.contains("stale_work") || detail.contains("stale_or_out_of_order_block") {
         "stale"
+    } else if detail.contains("launch_guard") {
+        "launch_guard"
     } else if detail.contains("pow_invalid") {
         "low_difficulty"
     } else if detail.contains("bad_prevhash")
@@ -129,7 +131,7 @@ fn submit_http_status(reason: &str) -> u16 {
     match reason {
         "stale" => 410,
         "low_difficulty" => 422,
-        "syncing" | "busy" => 503,
+        "syncing" | "busy" | "launch_guard" => 503,
         _ => 400,
     }
 }
@@ -142,6 +144,10 @@ fn submit_reason_message(reason: &str) -> String {
         }
         "work_mismatch" => {
             "Share rejected: work mismatch (chain tip changed). Please fetch new work.".to_string()
+        }
+        "launch_guard" => {
+            "Share rejected: launch guard is active and the node is not aligned with the official network backbone. Please retry after the node is fully aligned."
+                .to_string()
         }
         "syncing" => {
             "Share rejected: node is syncing. Please retry after the node catches up.".to_string()
@@ -573,6 +579,12 @@ mod tests {
     #[test]
     fn submit_reason_mapping_matches_expected_statuses() {
         assert_eq!(canonical_submit_reason("stale_work"), "stale");
+        assert_eq!(
+            canonical_submit_reason(
+                "launch_guard_official_height_mismatch tip_height=50 official_min_height=49"
+            ),
+            "launch_guard"
+        );
         assert_eq!(canonical_submit_reason("pow_invalid"), "low_difficulty");
         assert_eq!(canonical_submit_reason("bad_prevhash"), "work_mismatch");
         assert_eq!(canonical_submit_reason("syncing tip_height=9"), "syncing");
@@ -580,6 +592,7 @@ mod tests {
         assert_eq!(submit_http_status("stale"), 410);
         assert_eq!(submit_http_status("low_difficulty"), 422);
         assert_eq!(submit_http_status("syncing"), 503);
+        assert_eq!(submit_http_status("launch_guard"), 503);
     }
 
     #[test]

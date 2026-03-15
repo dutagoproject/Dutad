@@ -211,6 +211,7 @@ pub(crate) fn build_work_template(
             tip_h, best_h
         ));
     }
+    p2p::launch_guard_mining_ready(net, tip_h)?;
 
     let height = tip_h + 1;
     let prevhash32 = tip_hash32;
@@ -413,6 +414,20 @@ pub fn handle_work(
                 request,
                 tiny_http::StatusCode(503),
                 "syncing",
+                json!({"detail": e}),
+            );
+            return;
+        }
+        Err(e) if e.starts_with("launch_guard_") => {
+            wlog!(
+                "[dutad] WORK_REJECT addr={} reason=launch_guard detail={}",
+                short_addr(&miner),
+                e
+            );
+            crate::respond_error_detail(
+                request,
+                tiny_http::StatusCode(503),
+                "launch_guard_not_ready",
                 json!({"detail": e}),
             );
             return;

@@ -18,3 +18,4 @@ hex = "0.4"
 ed25519-dalek = { version = "2", features = ["std"] }
 sled = "0.34"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
+ctrlc = "3"

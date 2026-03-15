@@ -1,6 +1,7 @@
 # dutad 0.0.1-beta
 
 This is the first public beta release of the DUTA node stack.
+It is meant for people who want to run the network, inspect it, and work with the node directly.
 
 ## Highlights
 
@@ -49,6 +50,6 @@ If a checksum file is attached to the release, verify it before running the bina
 
 ## Notes for this beta
 
-This release is a public beta baseline. It is meant for operators, testers, and early infrastructure deployment, not for casual one-click desktop use.
+This release is a public beta baseline. It is aimed at operators, testers, and early infrastructure work, not one-click desktop users.
 
 For build, deployment, and security notes, see the repository documentation.

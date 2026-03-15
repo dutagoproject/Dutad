@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -330,6 +331,10 @@ fn print_runtime_status_tick(data_dir: &str) {
         tip_hash
         ),
     );
+}
+
+fn admin_rpc_bind_is_allowed(bind: &str) -> bool {
+    bind.trim() == "127.0.0.1"
 }
 
 fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
@@ -2003,19 +2008,31 @@ fn main() {
     let p2p_addr = format!("{}:{}", p2p_bind_ip, net.default_p2p_port());
 
     // Admin RPC bind/port (policy: localhost-only; locked port).
-    // We accept config/CLI only if they request 127.0.0.1; anything else is ignored.
+    // Invalid operator input must be explicit here. Silent fallback makes it look like
+    // the requested bind succeeded when it did not.
     let mut rpc_bind = "127.0.0.1".to_string();
     if let Some(b) = conf
         .get_last("rpcconnect")
         .or_else(|| conf.get_last("rpcbind"))
     {
-        if b.trim() == "127.0.0.1" {
+        if admin_rpc_bind_is_allowed(&b) {
             rpc_bind = "127.0.0.1".to_string();
+        } else if !b.trim().is_empty() {
+            eprintln!(
+                "daemon: RPC_BIND_POLICY_IGNORE requested={} allowed=127.0.0.1 reason=admin_rpc_must_stay_loopback",
+                b.trim()
+            );
         }
     }
     if let Some(b) = args.rpc_bind.as_deref() {
-        if b.trim() == "127.0.0.1" {
+        if admin_rpc_bind_is_allowed(b) {
             rpc_bind = "127.0.0.1".to_string();
+        } else {
+            eprintln!(
+                "daemon: RPC_BIND_POLICY_REJECT requested={} allowed=127.0.0.1 reason=admin_rpc_must_stay_loopback",
+                b.trim()
+            );
+            std::process::exit(2);
         }
     }
     let rpc_addr = format!("{}:{}", rpc_bind, net.default_daemon_rpc_port());
@@ -2122,14 +2139,28 @@ fn main() {
         thread::spawn(move || p2p::start_p2p(p2p_addr_for_thread, data_for_p2p, net_for_p2p, seeds));
     print_startup_guidance(&rpc_addr);
 
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let running = Arc::clone(&running);
+        let _ = ctrlc::set_handler(move || {
+            running.store(false, Ordering::SeqCst);
+        });
+    }
+
     let data_for_status = data_dir.clone();
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(30));
-        print_runtime_status_tick(&data_for_status);
+    let status_running = Arc::clone(&running);
+    thread::spawn(move || {
+        while status_running.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_secs(30));
+            if !status_running.load(Ordering::SeqCst) {
+                break;
+            }
+            print_runtime_status_tick(&data_for_status);
+        }
     });
 
     // Keep process alive, but fail closed if a critical service thread exits.
-    loop {
+    while running.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_secs(1));
         if rpc_thread.is_finished() {
             let outcome = rpc_thread.join();
@@ -2148,6 +2179,15 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    console_line("STATUS", ANSI_YELLOW, "shutdown signal received, flushing database and stopping");
+    if let Err(e) = store::flush_db(&data_dir) {
+        edlog!("daemon: SHUTDOWN_FLUSH_FAIL data={} err={}", data_dir, e);
+        eprintln!("daemon: SHUTDOWN_FLUSH_FAIL data={} err={}", data_dir, e);
+        std::process::exit(1);
+    }
+    edlog!("daemon: SHUTDOWN_OK data={}", data_dir);
+    println!("dutad: shutdown complete");
 }
 
 #[cfg(test)]

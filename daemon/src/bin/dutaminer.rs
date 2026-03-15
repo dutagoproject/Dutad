@@ -15,6 +15,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -36,18 +37,38 @@ use serde_json::json;
 struct Args {
     /// Mining RPC base URL, e.g. http://127.0.0.1:19085
     #[arg(long)]
-    rpc: String,
+    rpc: Option<String>,
 
     /// Miner address (daemon requires this parameter)
     #[arg(long)]
-    address: String,
+    address: Option<String>,
 
     /// Number of mining threads
-    #[arg(long, default_value_t = 1)]
-    threads: usize,
+    #[arg(long)]
+    threads: Option<usize>,
 
     /// Sleep between work polls (ms)
-    #[arg(long, default_value_t = 200)]
+    #[arg(long)]
+    poll_ms: Option<u64>,
+
+    /// Optional JSON config file
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct MinerConfigFile {
+    rpc: Option<String>,
+    address: Option<String>,
+    threads: Option<usize>,
+    poll_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeArgs {
+    rpc: String,
+    address: String,
+    threads: usize,
     poll_ms: u64,
 }
 
@@ -68,6 +89,9 @@ struct WorkResp {
 }
 
 const MIN_POLL_MS: u64 = 50;
+const GUARDED_BACKOFF_MS: u64 = 2_000;
+const BUSY_BACKOFF_MS: u64 = 1_000;
+const RPC_TIMEOUT_SECS: u64 = 5;
 
 fn now_unix() -> u64 {
     SystemTime::now()
@@ -147,7 +171,11 @@ fn http_request(
     timeout: Duration,
 ) -> Result<(String, Option<u16>), String> {
     let mut stream =
-        TcpStream::connect((host, port)).map_err(|e| format!("connect {host}:{port}: {e}"))?;
+        TcpStream::connect((host, port)).map_err(|e| {
+            format!(
+                "rpc_connection_failed_check_ip_firewall host={host} port={port} err={e}"
+            )
+        })?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     let _ = stream.set_nonblocking(false);
@@ -190,7 +218,12 @@ fn http_request(
                     }
                 }
                 if std::time::Instant::now() >= deadline {
-                    return Err(format!("read_response_timeout_after_{}ms", timeout.as_millis()));
+                    return Err(format!(
+                        "rpc_connection_timeout_check_ip_firewall timeout_ms={} host={} port={}",
+                        timeout.as_millis(),
+                        host,
+                        port
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -207,7 +240,7 @@ fn http_get(url: &str, path: &str) -> Result<(String, Option<u16>), String> {
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: dutaminer\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
-    http_request(&host, port, req.as_bytes(), Duration::from_secs(15))
+    http_request(&host, port, req.as_bytes(), Duration::from_secs(RPC_TIMEOUT_SECS))
 }
 
 fn http_post_json(url: &str, path: &str, body: &str) -> Result<(String, Option<u16>), String> {
@@ -217,7 +250,7 @@ fn http_post_json(url: &str, path: &str, body: &str) -> Result<(String, Option<u
         body.len(),
         body
     );
-    http_request(&host, port, req.as_bytes(), Duration::from_secs(15))
+    http_request(&host, port, req.as_bytes(), Duration::from_secs(RPC_TIMEOUT_SECS))
 }
 
 fn guess_mining_port_base(rpc_base: &str) -> Option<String> {
@@ -407,15 +440,97 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
     }
 }
 
+fn work_retry_delay_ms(http_code: Option<u16>, body: &str, poll_ms: u64) -> u64 {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return poll_ms;
+    };
+    let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+    let detail = v.get("detail").map(|x| x.to_string()).unwrap_or_default();
+    if err == "launch_guard_not_ready" || detail.contains("launch_guard_") {
+        return poll_ms.max(GUARDED_BACKOFF_MS);
+    }
+    if err == "syncing" || detail.contains("syncing") {
+        return poll_ms.max(GUARDED_BACKOFF_MS);
+    }
+    if err == "busy" || err == "too_many_outstanding_work" {
+        return poll_ms.max(BUSY_BACKOFF_MS);
+    }
+    if http_code == Some(429) {
+        return poll_ms.max(BUSY_BACKOFF_MS);
+    }
+    poll_ms
+}
+
+fn explain_work_fetch_reject(http_code: Option<u16>, body: &str) {
+    let code = http_code.unwrap_or(0);
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        eprintln!("work fetch http_code={} raw={}", code, body);
+        return;
+    };
+    let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("unknown_error");
+    let detail = v.get("detail").map(|x| x.to_string()).unwrap_or_default();
+    match err {
+        "launch_guard_not_ready" => {
+            eprintln!(
+                "work rejected: launch guard active; node is not aligned with official backbone yet detail={}",
+                detail
+            );
+        }
+        "syncing" => {
+            eprintln!("work rejected: node syncing detail={}", detail);
+        }
+        "busy" => {
+            eprintln!("work rejected: node busy");
+        }
+        "too_many_outstanding_work" => {
+            eprintln!("work rejected: too many outstanding work items for this miner");
+        }
+        _ => {
+            eprintln!("work fetch http_code={} error={} detail={}", code, err, detail);
+        }
+    }
+}
+
 fn normalized_poll_ms(poll_ms: u64) -> u64 {
     poll_ms.max(MIN_POLL_MS)
 }
 
-fn main() -> Result<(), String> {
-    let args = Args::parse();
-    if args.threads == 0 {
+fn load_config_file(path: &PathBuf) -> Result<MinerConfigFile, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read_config {}: {e}", path.display()))?;
+    serde_json::from_str::<MinerConfigFile>(&raw)
+        .map_err(|e| format!("parse_config {}: {e}", path.display()))
+}
+
+fn resolve_runtime_args(args: &Args) -> Result<RuntimeArgs, String> {
+    let cfg = match args.config.as_ref() {
+        Some(path) => load_config_file(path)?,
+        None => MinerConfigFile::default(),
+    };
+    let rpc = args
+        .rpc
+        .clone()
+        .or(cfg.rpc)
+        .ok_or_else(|| "--rpc is required".to_string())?;
+    let address = args
+        .address
+        .clone()
+        .or(cfg.address)
+        .ok_or_else(|| "--address is required".to_string())?;
+    let threads = args.threads.or(cfg.threads).unwrap_or(1);
+    if threads == 0 {
         return Err("--threads must be >= 1".to_string());
     }
+    Ok(RuntimeArgs {
+        rpc,
+        address,
+        threads,
+        poll_ms: args.poll_ms.or(cfg.poll_ms).unwrap_or(200),
+    })
+}
+
+fn main() -> Result<(), String> {
+    let args = resolve_runtime_args(&Args::parse())?;
     let poll_ms = normalized_poll_ms(args.poll_ms);
     if poll_ms != args.poll_ms {
         eprintln!(
@@ -441,6 +556,14 @@ fn main() -> Result<(), String> {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("work fetch error: {e}");
+                if e.contains("rpc_connection_failed_check_ip_firewall")
+                    || e.contains("rpc_connection_timeout_check_ip_firewall")
+                {
+                    eprintln!(
+                        "RPC Connection Failed - Check IP/Firewall (rpc={} timeout={}s)",
+                        rpc, RPC_TIMEOUT_SECS
+                    );
+                }
                 thread::sleep(Duration::from_millis(poll_ms));
                 continue;
             }
@@ -474,8 +597,12 @@ fn main() -> Result<(), String> {
                     }
                 }
 
-                eprintln!("work fetch http_code={} raw={}", c, w_body);
-                thread::sleep(Duration::from_millis(poll_ms));
+                explain_work_fetch_reject(Some(c), &w_body);
+                thread::sleep(Duration::from_millis(work_retry_delay_ms(
+                    Some(c),
+                    &w_body,
+                    poll_ms,
+                )));
                 continue;
             }
         }
@@ -619,7 +746,12 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_poll_ms, MIN_POLL_MS};
+    use super::{
+        normalized_poll_ms, resolve_runtime_args, work_retry_delay_ms, Args, BUSY_BACKOFF_MS,
+        GUARDED_BACKOFF_MS, MIN_POLL_MS,
+    };
+    use clap::Parser;
+    use std::fs;
 
     #[test]
     fn poll_ms_is_clamped_to_release_floor() {
@@ -628,5 +760,51 @@ mod tests {
         assert_eq!(normalized_poll_ms(49), MIN_POLL_MS);
         assert_eq!(normalized_poll_ms(50), 50);
         assert_eq!(normalized_poll_ms(200), 200);
+    }
+
+    #[test]
+    fn work_reject_backoff_escalates_for_launch_guard_and_busy_conditions() {
+        assert_eq!(
+            work_retry_delay_ms(
+                Some(503),
+                r#"{"error":"launch_guard_not_ready","detail":"launch_guard_official_peer_insufficient"}"#,
+                200
+            ),
+            GUARDED_BACKOFF_MS
+        );
+        assert_eq!(
+            work_retry_delay_ms(Some(503), r#"{"error":"syncing","detail":"syncing tip_height=5"}"#, 200),
+            GUARDED_BACKOFF_MS
+        );
+        assert_eq!(
+            work_retry_delay_ms(Some(429), r#"{"error":"too_many_outstanding_work"}"#, 200),
+            BUSY_BACKOFF_MS
+        );
+    }
+
+    #[test]
+    fn config_file_is_loaded_and_cli_overrides_it() {
+        let path = std::env::temp_dir().join(format!(
+            "dutaminer-test-{}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"{"rpc":"http://127.0.0.1:19085","address":"dutcfg","threads":3,"poll_ms":450}"#,
+        )
+        .unwrap();
+        let args = Args::parse_from([
+            "dutaminer",
+            "--config",
+            path.to_str().unwrap(),
+            "--threads",
+            "2",
+        ]);
+        let runtime = resolve_runtime_args(&args).unwrap();
+        assert_eq!(runtime.rpc, "http://127.0.0.1:19085");
+        assert_eq!(runtime.address, "dutcfg");
+        assert_eq!(runtime.threads, 2);
+        assert_eq!(runtime.poll_ms, 450);
+        let _ = fs::remove_file(path);
     }
 }

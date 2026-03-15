@@ -1,0 +1,6 @@
+{
+  "rpc": "http://127.0.0.1:19085",
+  "address": "YOUR_DUTA_ADDRESS",
+  "threads": 4,
+  "poll_ms": 200
+}

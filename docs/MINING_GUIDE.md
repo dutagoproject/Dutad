@@ -35,11 +35,34 @@ Then start the miner:
 ./dutaminer --rpc http://127.0.0.1:19085 --address YOUR_DUTA_ADDRESS --threads 12
 ```
 
+Or run it from a JSON config file:
+
+```bash
+./dutaminer --config miner.json
+```
+
+Example `miner.json`:
+
+```json
+{
+  "rpc": "http://127.0.0.1:19085",
+  "address": "YOUR_DUTA_ADDRESS",
+  "threads": 4,
+  "poll_ms": 200
+}
+```
+
+Ready-to-edit examples:
+
+- `examples/config/dutaminer.mainnet.json`
+- `examples/config/dutaminer.testnet.json`
+
 Notes:
 
 - `--rpc` must point to the mining listener, not the admin RPC port
 - `--address` must be a valid DUTA address
 - `--threads` should match your CPU budget
+- `--config` is optional and CLI flags override values loaded from the file
 
 ## Devfee schedule
 

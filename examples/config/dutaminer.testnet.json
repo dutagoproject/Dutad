@@ -1,0 +1,6 @@
+{
+  "rpc": "http://127.0.0.1:18085",
+  "address": "YOUR_TESTNET_DUTA_ADDRESS",
+  "threads": 2,
+  "poll_ms": 200
+}

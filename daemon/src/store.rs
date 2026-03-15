@@ -1649,6 +1649,12 @@ pub fn tip_fields(data_dir: &str) -> Option<(u64, String, u64, u64)> {
     Some((height, hash32, chainwork, bits))
 }
 
+pub fn flush_db(data_dir: &str) -> Result<(), String> {
+    let db = open_db(data_dir)?;
+    db.flush().map_err(|e| format!("db_flush_failed: {}", e))?;
+    Ok(())
+}
+
 /// Compute expected `bits` for the next block height (consensus).
 pub fn expected_bits_next(data_dir: &str) -> Result<u64, String> {
     let db = open_db(data_dir)?;
