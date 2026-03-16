@@ -184,6 +184,7 @@ fn launch_guard_backbone_targets(net: Network) -> Vec<String> {
 const LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS: u64 = 30;
 const LAUNCH_GUARD_RESYNC_INTERVAL_MS: u64 = 500;
 const LAUNCH_GUARD_DIAL_INTERVAL_SECS: u64 = 1;
+const EARLY_BOOTSTRAP_FULL_SYNC_HEIGHT: u64 = 16;
 
 pub fn launch_guard_user_detail(detail: &str) -> &'static str {
     if detail.starts_with("launch_guard_syncing") {
@@ -199,37 +200,60 @@ fn launch_guard_backbone_views(net: Network) -> Vec<(u64, String)> {
         return Vec::new();
     }
     let now = Instant::now();
+    let freshness = Duration::from_secs(LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS);
+    let mut merged: HashMap<String, (Instant, u64, String)> = HashMap::new();
+
+    let collect_peer = |peer: &PeerSnapshot, require_success: bool, merged: &mut HashMap<String, (Instant, u64, String)>| {
+        if require_success && peer.success_count == 0 {
+            return;
+        }
+        if now.duration_since(peer.last_seen_at) > freshness {
+            return;
+        }
+        let addr = peer.addr.to_ascii_lowercase();
+        if !expected.contains(&addr) {
+            return;
+        }
+        let Some(hash32) = peer.last_tip_hash32.as_ref() else {
+            return;
+        };
+        match merged.get(&addr) {
+            Some((seen_at, _, _)) if *seen_at >= peer.last_seen_at => {}
+            _ => {
+                merged.insert(addr, (peer.last_seen_at, peer.last_tip_height, hash32.clone()));
+            }
+        }
+    };
+
     match state().outbound_recent.lock() {
-        Ok(peers) => peers
-            .values()
-            .filter(|peer| {
-                peer.success_count > 0
-                    && now.duration_since(peer.last_seen_at)
-                        <= Duration::from_secs(LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS)
-                    && expected.contains(&peer.addr.to_ascii_lowercase())
-            })
-            .filter_map(|peer| {
-                peer.last_tip_hash32
-                    .as_ref()
-                    .map(|hash32| (peer.last_tip_height, hash32.clone()))
-            })
-            .collect(),
-        Err(poisoned) => poisoned
-            .into_inner()
-            .values()
-            .filter(|peer| {
-                peer.success_count > 0
-                    && now.duration_since(peer.last_seen_at)
-                        <= Duration::from_secs(LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS)
-                    && expected.contains(&peer.addr.to_ascii_lowercase())
-            })
-            .filter_map(|peer| {
-                peer.last_tip_hash32
-                    .as_ref()
-                    .map(|hash32| (peer.last_tip_height, hash32.clone()))
-            })
-            .collect(),
+        Ok(peers) => {
+            for peer in peers.values() {
+                collect_peer(peer, true, &mut merged);
+            }
+        }
+        Err(poisoned) => {
+            for peer in poisoned.into_inner().values() {
+                collect_peer(peer, true, &mut merged);
+            }
+        }
     }
+    match state().inbound_live.lock() {
+        Ok(peers) => {
+            for peer in peers.values() {
+                collect_peer(peer, false, &mut merged);
+            }
+        }
+        Err(poisoned) => {
+            for peer in poisoned.into_inner().values() {
+                collect_peer(peer, false, &mut merged);
+            }
+        }
+    }
+
+    merged
+        .into_values()
+        .map(|(_, height, hash32)| (height, hash32))
+        .collect()
 }
 
 fn launch_guard_unhealthy(net: Network, tip_height: u64, tip_hash32: &str) -> bool {
@@ -1344,7 +1368,11 @@ fn official_tip_sync_from(net: Network, peer: &str, local_h: u64, local_hash32: 
         && is_launch_backbone_peer_for_net(net, peer)
         && (remote_h > local_h || (remote_h == local_h && remote_hash32 != local_hash32))
     {
-        reorg_overlap_from(local_h)
+        if local_h <= EARLY_BOOTSTRAP_FULL_SYNC_HEIGHT {
+            0
+        } else {
+            reorg_overlap_from(local_h)
+        }
     } else {
         (local_h + 1) as usize
     }
@@ -3433,6 +3461,18 @@ mod tests {
     }
 
     #[test]
+    fn launch_guard_accepts_recent_inbound_official_backbone_peer_on_mainnet() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_inbound_peer_connected("seed1.dutago.xyz:19082");
+        super::note_inbound_peer_tip("seed1.dutago.xyz:19082", 50, &"11".repeat(32));
+        super::note_inbound_peer_connected("seed2.dutago.xyz:19082");
+        super::note_inbound_peer_tip("seed2.dutago.xyz:19082", 50, &"11".repeat(32));
+        let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
+    }
+
+    #[test]
     fn launch_guard_rejects_official_backbone_height_mismatch() {
         let _guard = launch_guard_test_lock().lock().unwrap();
         clear_test_peer_state();
@@ -3522,6 +3562,10 @@ mod tests {
 
     #[test]
     fn official_tip_sync_uses_overlap_for_official_ahead_or_conflicting_tip() {
+        assert_eq!(
+            official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 10, &"aa".repeat(32), 11, &"bb".repeat(32)),
+            0usize
+        );
         assert_eq!(
             official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 21, &"aa".repeat(32), 22, &"bb".repeat(32)),
             reorg_overlap_from(21)
