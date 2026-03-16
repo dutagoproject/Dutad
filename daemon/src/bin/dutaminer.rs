@@ -730,7 +730,7 @@ fn main() -> Result<(), String> {
             None => {
                 let ttl = w.expires_at.saturating_sub(now_unix());
                 eprintln!(
-                    "no solution before expiry (bits={}, ttl={}); fetching next work...",
+                    "work window ended before a valid block was found (bits={}, ttl={}); requesting fresh work...",
                     w.bits,
                     fmt_secs(ttl)
                 );
