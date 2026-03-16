@@ -647,6 +647,21 @@ pub fn p2p_public_info() -> serde_json::Value {
     let launch_guard_detail =
         launch_guard_mining_ready(launch_cfg, tip_h, &tip_hash32, tip_bits).err();
     let network_health_priority = network_health_priority_active();
+    let backbone_tip_lag = launch_backbone_max_height.unwrap_or(0).saturating_sub(tip_h);
+    let total_resync_requests = st.total_resync_requests.load(Ordering::Relaxed);
+    let total_competing_tip_events = st.total_competing_tip_events.load(Ordering::Relaxed);
+    let total_official_tip_syncs = st.total_official_tip_syncs.load(Ordering::Relaxed);
+    let total_reorg_accepts = st.total_reorg_accepts.load(Ordering::Relaxed);
+    let total_backbone_tie_reorgs = st.total_backbone_tie_reorgs.load(Ordering::Relaxed);
+    let bootstrap_counters = json!({
+        "network_health_priority_active": network_health_priority,
+        "backbone_tip_lag": backbone_tip_lag,
+        "total_resync_requests": total_resync_requests,
+        "total_competing_tip_events": total_competing_tip_events,
+        "total_official_tip_syncs": total_official_tip_syncs,
+        "total_reorg_accepts": total_reorg_accepts,
+        "total_backbone_tie_reorgs": total_backbone_tie_reorgs
+    });
 
     let bans = list_banned_entries();
     let ban_count = bans.len() as u64;
@@ -744,7 +759,7 @@ pub fn p2p_public_info() -> serde_json::Value {
         "launch_guard_backbone_min_height": launch_backbone_min_height,
         "launch_guard_backbone_max_height": launch_backbone_max_height,
         "launch_guard_detail": launch_guard_detail,
-        "network_health_priority_active": network_health_priority,
+        "bootstrap_counters": bootstrap_counters,
         "ban_count": ban_count,
         "bans": bans,
         "seed_count": seed_count,
@@ -795,6 +810,11 @@ struct P2pState {
     ip_scores: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     inbound_live: Mutex<HashMap<String, PeerSnapshot>>,
     outbound_recent: Mutex<HashMap<String, PeerSnapshot>>,
+    total_resync_requests: AtomicU64,
+    total_competing_tip_events: AtomicU64,
+    total_official_tip_syncs: AtomicU64,
+    total_reorg_accepts: AtomicU64,
+    total_backbone_tie_reorgs: AtomicU64,
 }
 
 #[derive(Clone, Debug)]
@@ -1329,6 +1349,14 @@ fn note_outbound_peer_result(
 }
 
 fn note_peer_resync(addr: &str, competing_tip: bool, official_tip_sync: bool) {
+    let st = state();
+    st.total_resync_requests.fetch_add(1, Ordering::Relaxed);
+    if competing_tip {
+        st.total_competing_tip_events.fetch_add(1, Ordering::Relaxed);
+    }
+    if official_tip_sync {
+        st.total_official_tip_syncs.fetch_add(1, Ordering::Relaxed);
+    }
     if let Ok(mut peers) = state().outbound_recent.lock() {
         if let Some(peer) = peers.get_mut(addr) {
             peer.resync_requests = peer.resync_requests.saturating_add(1);
@@ -1350,6 +1378,15 @@ fn note_peer_resync(addr: &str, competing_tip: bool, official_tip_sync: bool) {
                 peer.official_tip_syncs = peer.official_tip_syncs.saturating_add(1);
             }
         }
+    }
+}
+
+fn note_reorg_accept(backbone_tie: bool) {
+    let st = state();
+    st.total_reorg_accepts.fetch_add(1, Ordering::Relaxed);
+    if backbone_tie {
+        st.total_backbone_tie_reorgs
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1604,6 +1641,11 @@ fn state() -> &'static P2pState {
         ip_scores: Mutex::new(HashMap::new()),
         inbound_live: Mutex::new(HashMap::new()),
         outbound_recent: Mutex::new(HashMap::new()),
+        total_resync_requests: AtomicU64::new(0),
+        total_competing_tip_events: AtomicU64::new(0),
+        total_official_tip_syncs: AtomicU64::new(0),
+        total_reorg_accepts: AtomicU64::new(0),
+        total_backbone_tie_reorgs: AtomicU64::new(0),
     })
 }
 
@@ -1875,9 +1917,20 @@ fn should_accept_reorg_candidate(current_tip_cw: u64, incoming_cw: u64) -> bool 
     incoming_cw > current_tip_cw
 }
 
+fn backbone_exact_match_count(net: Network, height: u64, hash32: &str) -> usize {
+    launch_guard_backbone_views(net)
+        .into_iter()
+        .filter(|(backbone_height, backbone_hash32)| {
+            *backbone_height == height && backbone_hash32 == hash32
+        })
+        .count()
+}
+
 fn should_prefer_backbone_tie_candidate(
     net: Network,
     peer_addr: &str,
+    current_tip_height: u64,
+    current_tip_hash32: &str,
     candidate_height: u64,
     candidate_hash32: &str,
     current_tip_cw: u64,
@@ -1898,9 +1951,13 @@ fn should_prefer_backbone_tie_candidate(
     if !launch_relevant {
         return false;
     }
-    launch_guard_backbone_views(net)
-        .into_iter()
-        .any(|(height, hash32)| height == candidate_height && hash32 == candidate_hash32)
+    let candidate_exact = backbone_exact_match_count(net, candidate_height, candidate_hash32);
+    if candidate_exact == 0 {
+        return false;
+    }
+    let current_exact = backbone_exact_match_count(net, current_tip_height, current_tip_hash32);
+    candidate_exact > current_exact
+        || (candidate_exact > 0 && current_tip_height != candidate_height)
 }
 
 fn connect_peer(addr: &str) -> Result<TcpStream, String> {
@@ -2512,6 +2569,8 @@ fn handle_peer(
                                 && !should_prefer_backbone_tie_candidate(
                                     network,
                                     &peer,
+                                    tip_h,
+                                    &tip_hash,
                                     candidate_tip_height,
                                     candidate_tip_hash,
                                     tip_cw,
@@ -2542,6 +2601,8 @@ fn handle_peer(
                                         }
                                     };
                                     if n > 0 {
+                                        let backbone_tie = incoming_cw == tip_cw;
+                                        note_reorg_accept(backbone_tie);
                                         if let Some(last) = slice.last() {
                                             dlog!(
                                                 "p2p: reorg accepted blocks peer={} appended={} tip={} {}",
@@ -2620,6 +2681,8 @@ fn handle_peer(
                                     || should_prefer_backbone_tie_candidate(
                                         network,
                                         &peer,
+                                        tip_h,
+                                        &tip_hash,
                                         block.height,
                                         &block.hash32,
                                         tip_cw,
@@ -2642,6 +2705,8 @@ fn handle_peer(
                                     }
                                 };
                                 if appended > 0 {
+                                    let backbone_tie = cand_cw == tip_cw;
+                                    note_reorg_accept(backbone_tie);
                                     dlog!(
                                         "p2p: reorg accepted block peer={} tip={} {}",
                                         peer,
@@ -2946,6 +3011,8 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                     || should_prefer_backbone_tie_candidate(
                                         network,
                                         addr,
+                                        tip_h,
+                                        &tip_hash,
                                         candidate_tip_height,
                                         candidate_tip_hash,
                                         tip_cw,
@@ -2966,6 +3033,8 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                                 }
                                             };
                                             if appended > 0 {
+                                                let backbone_tie = incoming_cw == tip_cw;
+                                                note_reorg_accept(backbone_tie);
                                                 if let Some(last) = slice.last() {
                                                     dlog!(
                                                     "p2p: reorg peer={} rollback_to={} new_tip_height={} new_tip_hash={} new_tip_cw={}",
@@ -3032,6 +3101,12 @@ pub fn broadcast_block(block: &ChainBlock) {
         Some(c) => c,
         None => return,
     };
+    let tip_msg = Msg::Tip {
+        height: block.height,
+        hash32: block.hash32.clone(),
+        chainwork: block.chainwork,
+        bits: block.bits,
+    };
     let mut sent = 0usize;
     let targets = select_block_broadcast_targets(
         &outbound_candidates(),
@@ -3069,6 +3144,7 @@ pub fn broadcast_block(block: &ChainBlock) {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 },
             );
+            let _ = send_msg(&mut stream, &tip_msg);
             let _ = send_msg(
                 &mut stream,
                 &Msg::Block {
@@ -3335,6 +3411,8 @@ mod tests {
             Network::Mainnet,
             "seed1.dutago.xyz:19082",
             2,
+            &"11".repeat(32),
+            2,
             &"22".repeat(32),
             100,
             100,
@@ -3343,6 +3421,8 @@ mod tests {
             Network::Mainnet,
             "198.51.100.10:19082",
             2,
+            &"11".repeat(32),
+            2,
             &"22".repeat(32),
             100,
             100,
@@ -3350,6 +3430,8 @@ mod tests {
         assert!(!should_prefer_backbone_tie_candidate(
             Network::Mainnet,
             "seed1.dutago.xyz:19082",
+            2,
+            &"11".repeat(32),
             2,
             &"33".repeat(32),
             100,
