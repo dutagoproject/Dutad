@@ -182,7 +182,7 @@ pub fn pow_launch_guard_until_height(net: Network) -> u64 {
 
 pub fn pow_launch_guard_target_bits(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 22,
+        Network::Mainnet => 21,
         Network::Testnet | Network::Stagenet => pow_start_bits(net),
     }
 }
@@ -347,7 +347,7 @@ mod tests {
         assert!(pow_launch_guard_enabled(Network::Mainnet, 1, 12));
         assert!(pow_launch_guard_enabled(Network::Mainnet, 500, 12));
         assert!(!pow_launch_guard_enabled(Network::Mainnet, 501, 12));
-        assert!(!pow_launch_guard_enabled(Network::Mainnet, 1, 22));
+        assert!(!pow_launch_guard_enabled(Network::Mainnet, 1, 21));
         assert!(!pow_launch_guard_enabled(Network::Testnet, 1, 8));
         assert!(!pow_launch_guard_enabled(Network::Stagenet, 1, 10));
     }
