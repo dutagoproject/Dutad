@@ -511,7 +511,7 @@ pub fn handle_work(
                 request,
                 tiny_http::StatusCode(503),
                 "launch_guard_not_ready",
-                json!({"detail": e}),
+                json!({"detail": crate::p2p::launch_guard_user_detail(&e)}),
             );
             return;
         }

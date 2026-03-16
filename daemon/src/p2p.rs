@@ -164,14 +164,34 @@ fn bootstrap_has_healthy_peer() -> bool {
 }
 
 fn launch_guard_backbone_targets(net: Network) -> Vec<String> {
-    let port = net.default_p2p_port();
-    net.default_seed_hosts()
+    let port = net.default_p2p_port().to_string();
+    let mut out: Vec<String> = net
+        .default_seed_hosts()
         .iter()
         .map(|host: &&str| format!("{}:{}", host.to_ascii_lowercase(), port))
-        .collect()
+        .collect();
+    if let Some(cfg) = cfg() {
+        for seed in cfg.seeds.iter() {
+            let addr = candidate_addr(seed.trim(), &port).to_ascii_lowercase();
+            if !addr.is_empty() && !out.iter().any(|existing| existing == &addr) {
+                out.push(addr);
+            }
+        }
+    }
+    out
 }
 
-const LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS: u64 = 60;
+const LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS: u64 = 30;
+const LAUNCH_GUARD_RESYNC_INTERVAL_MS: u64 = 500;
+const LAUNCH_GUARD_DIAL_INTERVAL_SECS: u64 = 1;
+
+pub fn launch_guard_user_detail(detail: &str) -> &'static str {
+    if detail.starts_with("launch_guard_syncing") {
+        "waiting_for_chain_sync"
+    } else {
+        "waiting_for_official_chain_sync"
+    }
+}
 
 fn launch_guard_backbone_views(net: Network) -> Vec<(u64, String)> {
     let expected: HashSet<String> = launch_guard_backbone_targets(net).into_iter().collect();
@@ -336,18 +356,19 @@ pub fn launch_guard_local_submit_ready(
     net: Network,
     block_height: u64,
     block_hash32: &str,
-    current_bits: u64,
+    _current_bits: u64,
 ) -> Result<(), String> {
     if net != Network::Mainnet {
         return Ok(());
     }
-    let hard_guard =
-        netparams::pow_launch_guard_enabled(net, block_height.saturating_add(1), current_bits);
     let backbone_views = launch_guard_backbone_views(net);
     let backbone_peers = backbone_views.len();
     let min_backbone_peers = launch_guard_min_backbone_peers(net);
-    if !hard_guard && backbone_peers < min_backbone_peers {
-        return Ok(());
+    if backbone_peers < min_backbone_peers {
+        return Err(format!(
+            "launch_guard_official_peer_insufficient block_height={} official_backbone_peers={} required_backbone_peers={}",
+            block_height, backbone_peers, min_backbone_peers
+        ));
     }
     let official_ahead = backbone_views.iter().any(|(height, _)| *height > block_height);
     if official_ahead {
@@ -1283,8 +1304,12 @@ fn outbound_peer_quality(addr: &str) -> i64 {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
+    let official_backbone = cfg()
+        .and_then(|cfg| Network::parse_name(&cfg.net))
+        .map(|net| is_launch_backbone_peer_for_net(net, addr))
+        .unwrap_or(false);
     let Some(peer) = peers.get(addr) else {
-        return 0;
+        return if official_backbone { 1_000_000 } else { 0 };
     };
     let recency_bonus = if peer.last_seen_at.elapsed() <= Duration::from_secs(15 * 60) {
         3
@@ -1293,9 +1318,30 @@ fn outbound_peer_quality(addr: &str) -> i64 {
     } else {
         0
     };
-    peer.success_count as i64 * 4 - peer.failure_count as i64 * 3
+    let backbone_bonus = if official_backbone { 1_000_000 } else { 0 };
+    backbone_bonus
+        + peer.success_count as i64 * 4
+        - peer.failure_count as i64 * 3
         + peer.last_tip_height as i64 / 1024
         + recency_bonus
+}
+
+fn launch_guard_resync_interval(net: Network, peer: &str) -> Duration {
+    if net == Network::Mainnet
+        && (launch_guard_active_now() || is_launch_backbone_peer_for_net(net, peer))
+    {
+        Duration::from_millis(LAUNCH_GUARD_RESYNC_INTERVAL_MS)
+    } else {
+        Duration::from_secs(2)
+    }
+}
+
+fn outbound_tick_interval() -> Duration {
+    if launch_guard_active_now() {
+        Duration::from_secs(LAUNCH_GUARD_DIAL_INTERVAL_SECS)
+    } else {
+        Duration::from_secs(2)
+    }
 }
 
 fn select_outbound_targets(
@@ -2178,7 +2224,7 @@ fn handle_peer(
                             if first.height == tip_h + 1 {
                                 // Likely fork: peer is sending blocks that don't connect to our tip.
                                 // Ask for an overlapping window so we can find the common ancestor and reorg.
-                                if should_resync(&peer, Duration::from_secs(2)) {
+                                if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
                                     let from = reorg_overlap_from(tip_h);
                                     let limit = MAX_BLOCKS_PER_MSG;
                                     let _ =
@@ -2191,7 +2237,7 @@ fn handle_peer(
                                 // Out-of-order or different-tip blocks. Don't treat as misbehavior;
                                 // request the expected range from our current tip.
                                 if first.height > tip_h + 1 {
-                                    if should_resync(&peer, Duration::from_secs(2)) {
+                                    if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
                                         let from = (tip_h + 1) as usize;
                                         let limit = 128usize;
                                         let _ = send_msg(
@@ -2347,7 +2393,7 @@ fn handle_peer(
                     // ok normal extension
                 } else {
                         if block.height == tip_h + 1 {
-                            if should_resync(&peer, Duration::from_secs(2)) {
+                            if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
                                 let from = reorg_overlap_from(tip_h);
                                 let limit = MAX_BLOCKS_PER_MSG;
                                 let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
@@ -2412,7 +2458,7 @@ fn handle_peer(
                     if block.height != tip_h + 1 {
                         // Out-of-order / future block. Don't penalize; ask peer for the missing range.
                         if block.height > tip_h + 1 {
-                            if should_resync(&peer, Duration::from_secs(2)) {
+                            if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
                                 let from = (tip_h + 1) as usize;
                                 let limit = 128usize;
                                 let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
@@ -2435,7 +2481,7 @@ fn handle_peer(
                             if block.height == tip_h {
                                 if let Some(local_tip) = store::block_at(&data_dir, tip_h) {
                                     if local_tip.hash32 != block.hash32 {
-                                        if should_resync(&peer, Duration::from_secs(2)) {
+                                        if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
                                             let from = tip_h.saturating_sub(1) as usize;
                                             let limit = MAX_BLOCKS_PER_MSG;
                                             let _ = send_msg(
@@ -3015,7 +3061,7 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
             };
             dial_note_result(addr, ok);
         }
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(outbound_tick_interval());
     }
 }
 

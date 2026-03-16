@@ -146,7 +146,7 @@ fn submit_reason_message(reason: &str) -> String {
             "Share rejected: work mismatch (chain tip changed). Please fetch new work.".to_string()
         }
         "launch_guard" => {
-            "Share rejected: launch guard is active and the node is not aligned with the official network backbone. Please retry after the node is fully aligned."
+            "Share rejected: node is waiting for official chain sync. Please retry after the node is aligned."
                 .to_string()
         }
         "syncing" => {
@@ -160,13 +160,18 @@ fn submit_reason_message(reason: &str) -> String {
 
 fn submit_reject_body(detail: &str) -> (u16, String) {
     let reason = canonical_submit_reason(detail);
+    let user_detail = if reason == "launch_guard" {
+        crate::p2p::launch_guard_user_detail(detail).to_string()
+    } else {
+        detail.to_string()
+    };
     let mut obj = json!({
         "status":"rejected",
         "reason":reason,
         "reject_reason":reason,
         "message":submit_reason_message(reason),
         "error":"accept_failed",
-        "detail":detail
+        "detail":user_detail
     });
 
     if let Some(hs) = extract_u64_field(detail, "height=") {
