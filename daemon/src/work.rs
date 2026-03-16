@@ -258,7 +258,7 @@ pub(crate) fn build_work_template(
         .and_then(|x| x.as_array())
         .cloned()
         .unwrap_or_default();
-    let (tip_h, tip_hash32, _tip_bits, tip_chainwork) =
+    let (tip_h, tip_hash32, tip_bits, tip_chainwork) =
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
 
     let best_h = p2p::best_seen_height();
@@ -269,7 +269,7 @@ pub(crate) fn build_work_template(
         ));
     }
     if !official_pool_bypass {
-        p2p::launch_guard_mining_ready(net, tip_h)?;
+        p2p::launch_guard_mining_ready(net, tip_h, &tip_hash32, tip_bits)?;
     }
 
     let height = tip_h + 1;
