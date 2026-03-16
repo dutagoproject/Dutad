@@ -506,7 +506,7 @@ fn ip_is_loopback_or_private(ip: IpAddr) -> bool {
 }
 
 fn request_allows_private_work_burst(request: &tiny_http::Request, kind: &str) -> bool {
-    if kind != "work" && kind != "submit" {
+    if kind != "work" {
         return false;
     }
     request
