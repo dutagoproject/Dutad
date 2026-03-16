@@ -1598,6 +1598,34 @@ fn should_accept_reorg_candidate(current_tip_cw: u64, incoming_cw: u64) -> bool 
     incoming_cw > current_tip_cw
 }
 
+fn should_prefer_backbone_tie_candidate(
+    net: Network,
+    peer_addr: &str,
+    candidate_height: u64,
+    candidate_hash32: &str,
+    current_tip_cw: u64,
+    incoming_cw: u64,
+) -> bool {
+    if incoming_cw != current_tip_cw {
+        return false;
+    }
+    if net != Network::Mainnet {
+        return false;
+    }
+    if !is_launch_backbone_peer_for_net(net, peer_addr) {
+        return false;
+    }
+    let launch_relevant =
+        netparams::pow_launch_guard_enabled(net, candidate_height.saturating_add(1), 0)
+            || launch_guard_unhealthy(net, candidate_height, candidate_hash32);
+    if !launch_relevant {
+        return false;
+    }
+    launch_guard_backbone_views(net)
+        .into_iter()
+        .any(|(height, hash32)| height == candidate_height && hash32 == candidate_hash32)
+}
+
 fn connect_peer(addr: &str) -> Result<TcpStream, String> {
     let timeout = Duration::from_secs(CONNECT_TIMEOUT_SECS);
     let resolved = addr
@@ -1828,6 +1856,7 @@ fn handle_peer(
     data_dir: String,
     net: String,
 ) {
+    let network = Network::parse_name(&net).unwrap_or(Network::Mainnet);
     let peer = stream
         .peer_addr()
         .map(|a| a.to_string())
@@ -2193,7 +2222,22 @@ fn handle_peer(
                             let incoming_cw =
                                 store::compute_chainwork_for_candidate(&data_dir, fp, slice)
                                     .unwrap_or(0);
-                            if !should_accept_reorg_candidate(tip_cw, incoming_cw) {
+                            let candidate_tip_height =
+                                slice.last().map(|b| b.height).unwrap_or(fp);
+                            let candidate_tip_hash = slice
+                                .last()
+                                .map(|b| b.hash32.as_str())
+                                .unwrap_or_default();
+                            if !should_accept_reorg_candidate(tip_cw, incoming_cw)
+                                && !should_prefer_backbone_tie_candidate(
+                                    network,
+                                    &peer,
+                                    candidate_tip_height,
+                                    candidate_tip_hash,
+                                    tip_cw,
+                                    incoming_cw,
+                                )
+                            {
                                 edlog!(
                                     "p2p: ignore fork blocks peer={} first_height={} incoming_cw={} tip_cw={}",
                                     peer,
@@ -2290,7 +2334,15 @@ fn handle_peer(
                             )
                             .unwrap_or(0);
                             if prevb.hash32 == prev
-                                && should_accept_reorg_candidate(tip_cw, cand_cw)
+                                && (should_accept_reorg_candidate(tip_cw, cand_cw)
+                                    || should_prefer_backbone_tie_candidate(
+                                        network,
+                                        &peer,
+                                        block.height,
+                                        &block.hash32,
+                                        tip_cw,
+                                        cand_cw,
+                                    ))
                             {
                                 if let Err(e) = store::rollback_to_height(&data_dir, fp) {
                                     edlog!("p2p: reorg rollback_failed peer={} err={}", peer, e);
@@ -2453,6 +2505,7 @@ fn handle_peer(
 }
 
 fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
+    let network = Network::parse_name(net).unwrap_or(Network::Mainnet);
     let mut stream = connect_peer(addr)?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
@@ -2591,7 +2644,22 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                 let incoming_cw =
                                     store::compute_chainwork_for_candidate(&data_dir, fp_h, slice)
                                         .unwrap_or(0);
-                                if should_accept_reorg_candidate(tip_cw, incoming_cw) {
+                                let candidate_tip_height =
+                                    slice.last().map(|b| b.height).unwrap_or(fp_h);
+                                let candidate_tip_hash = slice
+                                    .last()
+                                    .map(|b| b.hash32.as_str())
+                                    .unwrap_or_default();
+                                if should_accept_reorg_candidate(tip_cw, incoming_cw)
+                                    || should_prefer_backbone_tie_candidate(
+                                        network,
+                                        addr,
+                                        candidate_tip_height,
+                                        candidate_tip_hash,
+                                        tip_cw,
+                                        incoming_cw,
+                                    )
+                                {
                                     match store::rollback_to_height(data_dir, fp_h) {
                                         Ok(()) => {
                                             let appended = match try_append_blocks(data_dir, slice)
@@ -2920,7 +2988,7 @@ mod tests {
         ban_peer_manual, canonicalize_peer_token, is_transient_dial_error, list_banned_json,
         launch_guard_mining_ready, normalize_bootstrap_candidates, parse_peers_text,
         read_line_limited, reorg_overlap_from, should_accept_reorg_candidate, subnet24_key,
-        unban_peer_manual, validate_block_basic,
+        should_prefer_backbone_tie_candidate, unban_peer_manual, validate_block_basic,
         MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
@@ -2950,6 +3018,51 @@ mod tests {
         assert!(!should_accept_reorg_candidate(100, 100));
         assert!(!should_accept_reorg_candidate(100, 99));
         assert!(should_accept_reorg_candidate(100, 101));
+    }
+
+    #[test]
+    fn launch_guard_prefers_official_backbone_tie_candidate() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::BEST_SEEN_HEIGHT.store(2, Ordering::Relaxed);
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(2),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(2),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        assert!(should_prefer_backbone_tie_candidate(
+            Network::Mainnet,
+            "seed1.dutago.xyz:19082",
+            2,
+            &"22".repeat(32),
+            100,
+            100,
+        ));
+        assert!(!should_prefer_backbone_tie_candidate(
+            Network::Mainnet,
+            "198.51.100.10:19082",
+            2,
+            &"22".repeat(32),
+            100,
+            100,
+        ));
+        assert!(!should_prefer_backbone_tie_candidate(
+            Network::Mainnet,
+            "seed1.dutago.xyz:19082",
+            2,
+            &"33".repeat(32),
+            100,
+            100,
+        ));
     }
 
     #[test]
