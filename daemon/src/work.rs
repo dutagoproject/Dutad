@@ -267,6 +267,12 @@ pub(crate) fn build_work_template(
 
     let mut txs_obj = mp.get("txs").cloned().unwrap_or_else(|| json!({}));
     if let Some(obj) = txs_obj.as_object_mut() {
+        for (_txid, txv) in obj.iter_mut() {
+            if let Some(txo) = txv.as_object_mut() {
+                txo.remove("fee");
+                txo.remove("size");
+            }
+        }
         obj.insert(coinbase_txid.clone(), coinbase_tx.clone());
         obj.insert("__order".to_string(), serde_json::Value::Array(txids.clone()));
     }
