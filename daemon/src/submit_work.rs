@@ -265,6 +265,18 @@ fn read_mempool_value(data_dir: &str) -> serde_json::Value {
     json!({"txids": [], "txs": {}})
 }
 
+fn net_from_datadir(data_dir: &str) -> duta_core::netparams::Network {
+    if let Some(net) = store::read_datadir_network(data_dir) {
+        net
+    } else if data_dir.contains("testnet") {
+        duta_core::netparams::Network::Testnet
+    } else if data_dir.contains("stagenet") {
+        duta_core::netparams::Network::Stagenet
+    } else {
+        duta_core::netparams::Network::Mainnet
+    }
+}
+
 fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     let mut mp = v.clone();
     let txs_obj = mp.get("txs").and_then(|x| x.as_object())?.clone();
@@ -321,6 +333,13 @@ pub(crate) fn accept_mined_block(
     data_dir: &str,
     mined_block: &ChainBlock,
 ) -> Result<serde_json::Value, String> {
+    let net = net_from_datadir(data_dir);
+    p2p::launch_guard_local_submit_ready(
+        net,
+        mined_block.height,
+        &mined_block.hash32,
+        mined_block.bits,
+    )?;
     store::note_accepted_block(data_dir, mined_block)?;
     p2p::note_local_tip_height(mined_block.height);
 

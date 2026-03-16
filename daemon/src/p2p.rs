@@ -332,6 +332,43 @@ pub fn launch_guard_mining_ready(
     Ok(())
 }
 
+pub fn launch_guard_local_submit_ready(
+    net: Network,
+    block_height: u64,
+    block_hash32: &str,
+    current_bits: u64,
+) -> Result<(), String> {
+    if net != Network::Mainnet {
+        return Ok(());
+    }
+    let hard_guard =
+        netparams::pow_launch_guard_enabled(net, block_height.saturating_add(1), current_bits);
+    let backbone_views = launch_guard_backbone_views(net);
+    let backbone_peers = backbone_views.len();
+    let min_backbone_peers = launch_guard_min_backbone_peers(net);
+    if !hard_guard && backbone_peers < min_backbone_peers {
+        return Ok(());
+    }
+    let official_ahead = backbone_views.iter().any(|(height, _)| *height > block_height);
+    if official_ahead {
+        let max_height = backbone_views.iter().map(|(height, _)| *height).max().unwrap_or(0);
+        return Err(format!(
+            "launch_guard_official_ahead block_height={} official_max_height={} official_backbone_peers={}",
+            block_height, max_height, backbone_peers
+        ));
+    }
+    let competing_same_height = backbone_views
+        .iter()
+        .any(|(height, hash32)| *height == block_height && hash32 != block_hash32);
+    if competing_same_height {
+        return Err(format!(
+            "launch_guard_competing_official_tip block_height={} official_backbone_peers={}",
+            block_height, backbone_peers
+        ));
+    }
+    Ok(())
+}
+
 fn log_dial_failed(addr: &str, err: &str) {
     let healthy = bootstrap_has_healthy_peer();
     let transient = is_transient_dial_error(err);
@@ -2986,7 +3023,7 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 mod tests {
     use super::{
         ban_peer_manual, canonicalize_peer_token, is_transient_dial_error, list_banned_json,
-        launch_guard_mining_ready, normalize_bootstrap_candidates, parse_peers_text,
+        launch_guard_local_submit_ready, launch_guard_mining_ready, normalize_bootstrap_candidates, parse_peers_text,
         read_line_limited, reorg_overlap_from, should_accept_reorg_candidate, subnet24_key,
         should_prefer_backbone_tie_candidate, unban_peer_manual, validate_block_basic,
         MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
@@ -3063,6 +3100,61 @@ mod tests {
             100,
             100,
         ));
+    }
+
+    #[test]
+    fn launch_guard_rejects_local_submit_when_official_tip_competes_at_same_height() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(26),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(26),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        let err = launch_guard_local_submit_ready(
+            Network::Mainnet,
+            26,
+            &"33".repeat(32),
+            22,
+        )
+        .unwrap_err();
+        assert!(err.starts_with("launch_guard_competing_official_tip"));
+    }
+
+    #[test]
+    fn launch_guard_allows_local_submit_when_official_tip_matches() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(26),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(26),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        let ready = launch_guard_local_submit_ready(
+            Network::Mainnet,
+            26,
+            &"22".repeat(32),
+            22,
+        );
+        assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
     #[test]
