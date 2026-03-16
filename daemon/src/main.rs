@@ -465,7 +465,7 @@ const WORK_MAX_PER_PRIVATE_IP_PER_SEC: u32 = 64;
 const SUBMIT_MAX_PER_IP_PER_SEC: u32 = 16;
 const RPC_MAX_PER_IP_PER_SEC: u32 = 20;
 const QUERY_MAX_PER_IP_PER_SEC: u32 = 30;
-const BLOCKS_FROM_MAX_LIMIT: usize = 512;
+const BLOCKS_FROM_MAX_LIMIT: usize = 1024;
 
 #[derive(Debug, Default)]
 struct RateCounters {
@@ -1209,7 +1209,6 @@ fn tip_json(data_dir: &str) -> String {
 }
 
 fn blocks_from_json(data_dir: &str, from: usize, limit: usize) -> Option<String> {
-    let mut out: Vec<ChainBlock> = Vec::new();
     let mut start = from as u64;
 
     // Genesis (height=0) is not stored in DB; if the caller asks from=0 and DB has blocks,
@@ -1221,13 +1220,7 @@ fn blocks_from_json(data_dir: &str, from: usize, limit: usize) -> Option<String>
         start = 1;
     }
 
-    for i in 0..limit {
-        let h = start + i as u64;
-        match store::block_at(data_dir, h) {
-            Some(b) => out.push(b),
-            None => break,
-        }
-    }
+    let out = store::blocks_from_range(data_dir, start, limit);
     serde_json::to_string(&out).ok()
 }
 

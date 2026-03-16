@@ -319,8 +319,11 @@ pub fn launch_guard_mining_ready(
     let far_lagging_backbone = backbone_views
         .iter()
         .any(|(height, _)| height.saturating_add(1) < tip_height);
-    let backbone_has_nearby_consensus =
-        matching_backbone_peers > 0 || one_behind_backbone_peers == backbone_peers;
+    let backbone_has_nearby_consensus = if hard_guard && tip_height > 1 {
+        matching_backbone_peers > 0
+    } else {
+        matching_backbone_peers > 0 || one_behind_backbone_peers == backbone_peers
+    };
     let backbone_mismatch = conflicting_tip_hash
         || ahead_backbone
         || far_lagging_backbone
@@ -764,13 +767,13 @@ const PEERS_MAX: usize = 512;
 const PEERS_FLUSH_INTERVAL_SECS: u64 = 15;
 // A larger batch window helps peers discover older fork points and converge
 // without needing a full datadir wipe after short-lived network splits.
-const MAX_BLOCKS_PER_MSG: usize = 64;
+const MAX_BLOCKS_PER_MSG: usize = 128;
 const MAX_PEER_TOKEN_LEN: usize = 255;
 const OUTBOUND_BAD_PEER_COOLDOWN_SECS: u64 = 30 * 60;
 const OUTBOUND_BAD_PEER_MIN_FAILS: u64 = 6;
 const OUTBOUND_BAD_PEER_DOMINANT_FAILS: u64 = 12;
 const OUTBOUND_BAD_PEER_MAX_EXPOSED: usize = 32;
-const MAX_OUTBOUND_DIALS_PER_TICK: usize = 24;
+const MAX_OUTBOUND_DIALS_PER_TICK: usize = 32;
 const BLOCK_BROADCAST_FANOUT: usize = 16;
 const BLOCK_BROADCAST_MIN_INTERVAL_MS: u64 = 500;
 const TX_BROADCAST_FANOUT: usize = 8;
@@ -1341,6 +1344,14 @@ fn outbound_tick_interval() -> Duration {
         Duration::from_secs(LAUNCH_GUARD_DIAL_INTERVAL_SECS)
     } else {
         Duration::from_secs(2)
+    }
+}
+
+fn block_broadcast_fanout() -> usize {
+    if launch_guard_active_now() {
+        BLOCK_BROADCAST_FANOUT.saturating_mul(2)
+    } else {
+        BLOCK_BROADCAST_FANOUT
     }
 }
 
@@ -2827,7 +2838,7 @@ pub fn broadcast_block(block: &ChainBlock) {
         &outbound_candidates(),
         &cfg.port,
         &cfg.local_ip,
-        BLOCK_BROADCAST_FANOUT,
+        block_broadcast_fanout(),
     );
     let now = Instant::now();
     for addr in targets.iter() {
@@ -3206,13 +3217,13 @@ mod tests {
     #[test]
     fn reorg_overlap_leaves_room_for_competing_tip_blocks() {
         assert_eq!(reorg_overlap_from(10), 0);
-        assert_eq!(reorg_overlap_from(50), 18);
+        assert_eq!(reorg_overlap_from(50), 0);
         assert_eq!(reorg_overlap_from((MAX_BLOCKS_PER_MSG / 2) as u64), 0);
         assert_eq!(
             reorg_overlap_from(MAX_BLOCKS_PER_MSG as u64),
             MAX_BLOCKS_PER_MSG / 2
         );
-        assert_eq!(reorg_overlap_from(128), 96);
+        assert_eq!(reorg_overlap_from(128), 64);
         assert_eq!(reorg_overlap_from(500), 500usize - (MAX_BLOCKS_PER_MSG / 2));
     }
 
@@ -3466,6 +3477,28 @@ mod tests {
             None,
         );
         let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        assert!(ready.is_err(), "unexpected ready state");
+    }
+
+    #[test]
+    fn launch_guard_allows_all_backbone_peers_one_block_behind_only_at_bootstrap_start() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(0),
+            Some(&"aa".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(0),
+            Some(&"bb".repeat(32)),
+            None,
+        );
+        let ready = launch_guard_mining_ready(Network::Mainnet, 1, &"11".repeat(32), 12);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 

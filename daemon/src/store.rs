@@ -1671,6 +1671,42 @@ pub fn block_at(data_dir: &str, height: u64) -> Option<ChainBlock> {
     block_at_from_tree(&blocks, height)
 }
 
+pub fn blocks_from_range(data_dir: &str, from: u64, limit: usize) -> Vec<ChainBlock> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let db = match open_db(data_dir) {
+        Ok(db) => db,
+        Err(_) => return Vec::new(),
+    };
+    let blocks = match tree_blocks(&db) {
+        Ok(blocks) => blocks,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<ChainBlock> = Vec::with_capacity(limit.min(256));
+    for item in blocks.range(block_key(from)..) {
+        let Ok((_, bytes)) = item else {
+            break;
+        };
+        let Ok(block) = serde_json::from_slice::<ChainBlock>(&bytes) else {
+            break;
+        };
+        if block.height < from {
+            continue;
+        }
+        if let Some(prev) = out.last() {
+            if block.height != prev.height.saturating_add(1) {
+                break;
+            }
+        }
+        out.push(block);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
 /// Lookup a UTXO outpoint in DB.
 /// Returns (value, created_height, is_coinbase)
 pub fn utxo_get(data_dir: &str, txid: &str, vout: u64) -> Option<(u64, u64, bool, String)> {
