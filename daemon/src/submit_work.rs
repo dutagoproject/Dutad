@@ -338,13 +338,23 @@ pub(crate) fn accept_mined_block(
     data_dir: &str,
     mined_block: &ChainBlock,
 ) -> Result<serde_json::Value, String> {
+    accept_mined_block_with_source(data_dir, mined_block, false)
+}
+
+pub(crate) fn accept_mined_block_with_source(
+    data_dir: &str,
+    mined_block: &ChainBlock,
+    official_stratum_source: bool,
+) -> Result<serde_json::Value, String> {
     let net = net_from_datadir(data_dir);
-    p2p::launch_guard_local_submit_ready(
-        net,
-        mined_block.height,
-        &mined_block.hash32,
-        mined_block.bits,
-    )?;
+    if !official_stratum_source {
+        p2p::launch_guard_local_submit_ready(
+            net,
+            mined_block.height,
+            &mined_block.hash32,
+            mined_block.bits,
+        )?;
+    }
     store::note_accepted_block(data_dir, mined_block)?;
     p2p::note_local_tip_height(mined_block.height);
 
@@ -403,6 +413,13 @@ pub(crate) fn accept_mined_block(
     }))
 }
 
+fn submit_source_is_official_stratum(request: &tiny_http::Request) -> bool {
+    request.headers().iter().any(|h| {
+        h.field.equiv("X-DUTA-Work-Source")
+            && h.value.as_str().eq_ignore_ascii_case("official-stratum")
+    })
+}
+
 pub(crate) fn build_mined_block_from_work_nonce(
     work_id: &str,
     nonce: u64,
@@ -451,6 +468,7 @@ pub fn handle_submit_work(
     data_dir: &str,
     respond_json: fn(tiny_http::Request, tiny_http::StatusCode, String),
 ) {
+    let official_stratum_source = submit_source_is_official_stratum(&request);
     if request.method() != &tiny_http::Method::Post {
         wlog!("[dutad] SUBMIT_REJECT reason=method_not_allowed");
         crate::respond_error(request, tiny_http::StatusCode(405), "method_not_allowed");
@@ -574,7 +592,11 @@ pub fn handle_submit_work(
         }
     };
 
-    let accepted = match accept_mined_block(data_dir, &mined_block) {
+    let accepted = match accept_mined_block_with_source(
+        data_dir,
+        &mined_block,
+        official_stratum_source,
+    ) {
         Ok(v) => v,
         Err(e) => {
             let detail = e.clone();
