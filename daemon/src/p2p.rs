@@ -814,6 +814,7 @@ const BLOCK_BROADCAST_FANOUT: usize = 16;
 const BLOCK_BROADCAST_MIN_INTERVAL_MS: u64 = 500;
 const TX_BROADCAST_FANOUT: usize = 8;
 const CONNECT_TIMEOUT_SECS: u64 = 5;
+const HEALTH_PRIORITY_BROADCAST_WAIT_MS: u64 = 500;
 const CONNECT_TRANSIENT_RETRIES: usize = 3;
 const CONNECT_TRANSIENT_RETRY_DELAY_MS: u64 = 200;
 
@@ -1367,7 +1368,7 @@ fn outbound_peer_quality(addr: &str) -> i64 {
 
 fn launch_guard_resync_interval(net: Network, peer: &str) -> Duration {
     if net == Network::Mainnet
-        && (launch_guard_active_now() || is_launch_backbone_peer_for_net(net, peer))
+        && (network_health_priority_active() || is_launch_backbone_peer_for_net(net, peer))
     {
         Duration::from_millis(LAUNCH_GUARD_RESYNC_INTERVAL_MS)
     } else {
@@ -1401,10 +1402,18 @@ fn outbound_tick_interval() -> Duration {
 }
 
 fn block_broadcast_fanout() -> usize {
-    if launch_guard_active_now() {
+    if network_health_priority_active() {
         BLOCK_BROADCAST_FANOUT.saturating_mul(2)
     } else {
         BLOCK_BROADCAST_FANOUT
+    }
+}
+
+fn broadcast_followup_wait() -> Duration {
+    if network_health_priority_active() {
+        Duration::from_millis(HEALTH_PRIORITY_BROADCAST_WAIT_MS)
+    } else {
+        Duration::from_millis(250)
     }
 }
 
@@ -2885,7 +2894,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                             }
 
                             // Still doesn't connect: request overlap resync (with backoff) and avoid spam.
-                            let min_interval = Duration::from_secs(2);
+                            let min_interval = launch_guard_resync_interval(network, addr);
                             if should_resync(addr, min_interval) {
                                 let from = reorg_overlap_from(tip_h);
                                 // Keep limit modest; dial loop runs often.
@@ -2966,7 +2975,7 @@ pub fn broadcast_block(block: &ChainBlock) {
             let _ = serve_broadcast_followups(
                 &mut stream,
                 &cfg.data_dir,
-                Duration::from_millis(250),
+                broadcast_followup_wait(),
             );
             sent += 1;
         }
