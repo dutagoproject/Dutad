@@ -284,9 +284,19 @@ pub fn launch_guard_mining_ready(
         .iter()
         .filter(|(_, hash32)| hash32 != tip_hash32)
         .count();
-    let backbone_mismatch = backbone_views
+    let matching_backbone_peers = backbone_views
         .iter()
-        .any(|(height, hash32)| *height != tip_height || hash32 != tip_hash32);
+        .filter(|(height, hash32)| *height == tip_height && hash32 == tip_hash32)
+        .count();
+    let conflicting_tip_hash = backbone_views
+        .iter()
+        .any(|(height, hash32)| *height == tip_height && hash32 != tip_hash32);
+    let ahead_backbone = backbone_views.iter().any(|(height, _)| *height > tip_height);
+    let far_lagging_backbone = backbone_views
+        .iter()
+        .any(|(height, _)| height.saturating_add(1) < tip_height);
+    let backbone_mismatch =
+        conflicting_tip_hash || ahead_backbone || far_lagging_backbone || matching_backbone_peers == 0;
 
     if !(hard_guard || syncing || insufficient_backbone || backbone_mismatch) {
         return Ok(());
@@ -307,8 +317,8 @@ pub fn launch_guard_mining_ready(
         let min_height = backbone_heights.iter().copied().min().unwrap_or(0);
         let max_height = backbone_heights.iter().copied().max().unwrap_or(0);
         return Err(format!(
-            "launch_guard_official_tip_mismatch tip_height={} official_min_height={} official_max_height={} official_backbone_peers={} official_hash_mismatches={}",
-            tip_height, min_height, max_height, backbone_peers, backbone_hash_mismatches
+            "launch_guard_official_tip_mismatch tip_height={} official_min_height={} official_max_height={} official_backbone_peers={} official_hash_mismatches={} official_tip_matches={}",
+            tip_height, min_height, max_height, backbone_peers, backbone_hash_mismatches, matching_backbone_peers
         ));
     }
     Ok(())
@@ -3149,6 +3159,72 @@ mod tests {
             "seed2.dutago.xyz:19082",
             true,
             Some(51),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        let err = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        assert!(err.starts_with("launch_guard_official_tip_mismatch"));
+    }
+
+    #[test]
+    fn launch_guard_allows_one_block_of_backbone_lag_when_one_seed_matches_tip() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(50),
+            Some(&"11".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(49),
+            Some(&"99".repeat(32)),
+            None,
+        );
+        let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
+    }
+
+    #[test]
+    fn launch_guard_rejects_backbone_that_lags_more_than_one_block() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(50),
+            Some(&"11".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(48),
+            Some(&"88".repeat(32)),
+            None,
+        );
+        let err = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        assert!(err.starts_with("launch_guard_official_tip_mismatch"));
+    }
+
+    #[test]
+    fn launch_guard_rejects_conflicting_hash_at_same_height() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(50),
+            Some(&"11".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(50),
             Some(&"22".repeat(32)),
             None,
         );
