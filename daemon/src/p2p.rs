@@ -318,6 +318,29 @@ fn launch_guard_backbone_heights(net: Network) -> Vec<u64> {
         .collect()
 }
 
+fn launch_guard_backbone_summary(
+    net: Network,
+    tip_height: u64,
+    tip_hash32: &str,
+) -> (usize, usize, usize, Option<u64>, Option<u64>) {
+    let views = launch_guard_backbone_views(net);
+    let exact_matches = views
+        .iter()
+        .filter(|(height, hash32)| *height == tip_height && hash32 == tip_hash32)
+        .count();
+    let one_behind = views
+        .iter()
+        .filter(|(height, _)| height.saturating_add(1) == tip_height)
+        .count();
+    let mismatches = views
+        .iter()
+        .filter(|(height, hash32)| *height != tip_height || hash32 != tip_hash32)
+        .count();
+    let min_height = views.iter().map(|(height, _)| *height).min();
+    let max_height = views.iter().map(|(height, _)| *height).max();
+    (exact_matches, one_behind, mismatches, min_height, max_height)
+}
+
 pub fn launch_guard_mining_ready(
     net: Network,
     tip_height: u64,
@@ -609,6 +632,13 @@ pub fn p2p_public_info() -> serde_json::Value {
         .into_iter()
         .map(|(_, hash32)| hash32)
         .collect();
+    let (
+        launch_backbone_exact_matches,
+        launch_backbone_one_behind,
+        launch_backbone_mismatches,
+        launch_backbone_min_height,
+        launch_backbone_max_height,
+    ) = launch_guard_backbone_summary(launch_cfg, tip_h, &tip_hash32);
     let launch_required_backbone_peers = launch_guard_min_backbone_peers(launch_cfg) as u64;
     let launch_guard_hard_active =
         netparams::pow_launch_guard_enabled(launch_cfg, tip_h.saturating_add(1), tip_bits);
@@ -616,6 +646,7 @@ pub fn p2p_public_info() -> serde_json::Value {
     let launch_guard_active = launch_guard_hard_active || launch_guard_unhealthy_now;
     let launch_guard_detail =
         launch_guard_mining_ready(launch_cfg, tip_h, &tip_hash32, tip_bits).err();
+    let network_health_priority = network_health_priority_active();
 
     let bans = list_banned_entries();
     let ban_count = bans.len() as u64;
@@ -707,7 +738,13 @@ pub fn p2p_public_info() -> serde_json::Value {
         "launch_guard_backbone_peers": launch_backbone_peers,
         "launch_guard_backbone_heights": launch_backbone_heights,
         "launch_guard_backbone_hashes": launch_backbone_hashes,
+        "launch_guard_backbone_exact_matches": launch_backbone_exact_matches as u64,
+        "launch_guard_backbone_one_behind": launch_backbone_one_behind as u64,
+        "launch_guard_backbone_mismatches": launch_backbone_mismatches as u64,
+        "launch_guard_backbone_min_height": launch_backbone_min_height,
+        "launch_guard_backbone_max_height": launch_backbone_max_height,
         "launch_guard_detail": launch_guard_detail,
+        "network_health_priority_active": network_health_priority,
         "ban_count": ban_count,
         "bans": bans,
         "seed_count": seed_count,
@@ -1461,6 +1498,27 @@ fn select_outbound_targets(
             if out.len() >= limit {
                 break;
             }
+            out.push(addr);
+        }
+    }
+    out
+}
+
+fn select_block_broadcast_targets(peers: &[String], port: &str, local_ip: &str) -> Vec<String> {
+    let limit = block_broadcast_fanout();
+    let mut out = select_outbound_targets(peers, port, local_ip, limit);
+    if !network_health_priority_active() {
+        return out;
+    }
+    let net = cfg()
+        .and_then(|cfg| Network::parse_name(&cfg.net))
+        .unwrap_or(Network::Mainnet);
+    let mut seen: HashSet<String> = out.iter().cloned().collect();
+    for addr in peers.iter().map(|peer| candidate_addr(peer, port)) {
+        if out.len() >= limit {
+            break;
+        }
+        if is_launch_backbone_peer_for_net(net, &addr) && seen.insert(addr.clone()) {
             out.push(addr);
         }
     }
@@ -2929,11 +2987,10 @@ pub fn broadcast_block(block: &ChainBlock) {
         None => return,
     };
     let mut sent = 0usize;
-    let targets = select_outbound_targets(
+    let targets = select_block_broadcast_targets(
         &outbound_candidates(),
         &cfg.port,
         &cfg.local_ip,
-        block_broadcast_fanout(),
     );
     let now = Instant::now();
     for addr in targets.iter() {
@@ -3442,6 +3499,23 @@ mod tests {
         );
         assert_eq!(targets.len(), 2);
         assert!(targets.iter().all(|addr| addr.starts_with("seed")));
+    }
+
+    #[test]
+    fn block_broadcast_targets_include_official_backbone_first() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        let targets = super::select_block_broadcast_targets(
+            &[
+                "198.51.100.10:19082".to_string(),
+                "seed1.dutago.xyz:19082".to_string(),
+                "seed2.dutago.xyz:19082".to_string(),
+            ],
+            "19082",
+            "",
+        );
+        assert!(!targets.is_empty());
+        assert!(targets[0].starts_with("seed"));
     }
 
     #[test]
