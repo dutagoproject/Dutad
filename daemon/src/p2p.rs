@@ -288,6 +288,10 @@ pub fn launch_guard_mining_ready(
         .iter()
         .filter(|(height, hash32)| *height == tip_height && hash32 == tip_hash32)
         .count();
+    let one_behind_backbone_peers = backbone_views
+        .iter()
+        .filter(|(height, _)| *height + 1 == tip_height)
+        .count();
     let conflicting_tip_hash = backbone_views
         .iter()
         .any(|(height, hash32)| *height == tip_height && hash32 != tip_hash32);
@@ -295,8 +299,12 @@ pub fn launch_guard_mining_ready(
     let far_lagging_backbone = backbone_views
         .iter()
         .any(|(height, _)| height.saturating_add(1) < tip_height);
-    let backbone_mismatch =
-        conflicting_tip_hash || ahead_backbone || far_lagging_backbone || matching_backbone_peers == 0;
+    let backbone_has_nearby_consensus =
+        matching_backbone_peers > 0 || one_behind_backbone_peers == backbone_peers;
+    let backbone_mismatch = conflicting_tip_hash
+        || ahead_backbone
+        || far_lagging_backbone
+        || !backbone_has_nearby_consensus;
 
     if !(hard_guard || syncing || insufficient_backbone || backbone_mismatch) {
         return Ok(());
@@ -317,8 +325,8 @@ pub fn launch_guard_mining_ready(
         let min_height = backbone_heights.iter().copied().min().unwrap_or(0);
         let max_height = backbone_heights.iter().copied().max().unwrap_or(0);
         return Err(format!(
-            "launch_guard_official_tip_mismatch tip_height={} official_min_height={} official_max_height={} official_backbone_peers={} official_hash_mismatches={} official_tip_matches={}",
-            tip_height, min_height, max_height, backbone_peers, backbone_hash_mismatches, matching_backbone_peers
+            "launch_guard_official_tip_mismatch tip_height={} official_min_height={} official_max_height={} official_backbone_peers={} official_hash_mismatches={} official_tip_matches={} official_one_behind_matches={}",
+            tip_height, min_height, max_height, backbone_peers, backbone_hash_mismatches, matching_backbone_peers, one_behind_backbone_peers
         ));
     }
     Ok(())
@@ -3182,6 +3190,28 @@ mod tests {
             true,
             Some(49),
             Some(&"99".repeat(32)),
+            None,
+        );
+        let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
+    }
+
+    #[test]
+    fn launch_guard_allows_when_all_backbone_peers_are_exactly_one_block_behind() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(49),
+            Some(&"aa".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(49),
+            Some(&"bb".repeat(32)),
             None,
         );
         let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
