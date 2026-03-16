@@ -150,7 +150,8 @@ fn bootstrap_has_healthy_peer() -> bool {
     let now = Instant::now();
     if let Ok(peers) = state().outbound_recent.lock() {
         if peers.values().any(|peer| {
-            peer.success_count > 0 && now.duration_since(peer.last_seen_at) <= Duration::from_secs(300)
+            peer.success_count > 0
+                && now.duration_since(peer.last_seen_at) <= Duration::from_secs(300)
         }) {
             return true;
         }
@@ -203,27 +204,33 @@ fn launch_guard_backbone_views(net: Network) -> Vec<(u64, String)> {
     let freshness = Duration::from_secs(LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS);
     let mut merged: HashMap<String, (Instant, u64, String)> = HashMap::new();
 
-    let collect_peer = |peer: &PeerSnapshot, require_success: bool, merged: &mut HashMap<String, (Instant, u64, String)>| {
-        if require_success && peer.success_count == 0 {
-            return;
-        }
-        if now.duration_since(peer.last_seen_at) > freshness {
-            return;
-        }
-        let addr = peer.addr.to_ascii_lowercase();
-        if !expected.contains(&addr) {
-            return;
-        }
-        let Some(hash32) = peer.last_tip_hash32.as_ref() else {
-            return;
-        };
-        match merged.get(&addr) {
-            Some((seen_at, _, _)) if *seen_at >= peer.last_seen_at => {}
-            _ => {
-                merged.insert(addr, (peer.last_seen_at, peer.last_tip_height, hash32.clone()));
+    let collect_peer =
+        |peer: &PeerSnapshot,
+         require_success: bool,
+         merged: &mut HashMap<String, (Instant, u64, String)>| {
+            if require_success && peer.success_count == 0 {
+                return;
             }
-        }
-    };
+            if now.duration_since(peer.last_seen_at) > freshness {
+                return;
+            }
+            let addr = peer.addr.to_ascii_lowercase();
+            if !expected.contains(&addr) {
+                return;
+            }
+            let Some(hash32) = peer.last_tip_hash32.as_ref() else {
+                return;
+            };
+            match merged.get(&addr) {
+                Some((seen_at, _, _)) if *seen_at >= peer.last_seen_at => {}
+                _ => {
+                    merged.insert(
+                        addr,
+                        (peer.last_seen_at, peer.last_tip_height, hash32.clone()),
+                    );
+                }
+            }
+        };
 
     match state().outbound_recent.lock() {
         Ok(peers) => {
@@ -290,7 +297,8 @@ fn network_health_priority_active() -> bool {
         return false;
     }
     let (tip_height, tip_hash32, _tip_bits, _tip_cw) = tip_fields(&cfg.data_dir);
-    tip_height <= HEALTH_SYNC_PRIORITY_HEIGHT || launch_guard_unhealthy(net, tip_height, &tip_hash32)
+    tip_height <= HEALTH_SYNC_PRIORITY_HEIGHT
+        || launch_guard_unhealthy(net, tip_height, &tip_hash32)
 }
 
 fn is_launch_backbone_peer_for_net(net: Network, addr: &str) -> bool {
@@ -338,7 +346,13 @@ fn launch_guard_backbone_summary(
         .count();
     let min_height = views.iter().map(|(height, _)| *height).min();
     let max_height = views.iter().map(|(height, _)| *height).max();
-    (exact_matches, one_behind, mismatches, min_height, max_height)
+    (
+        exact_matches,
+        one_behind,
+        mismatches,
+        min_height,
+        max_height,
+    )
 }
 
 pub fn launch_guard_mining_ready(
@@ -374,7 +388,9 @@ pub fn launch_guard_mining_ready(
     let conflicting_tip_hash = backbone_views
         .iter()
         .any(|(height, hash32)| *height == tip_height && hash32 != tip_hash32);
-    let ahead_backbone = backbone_views.iter().any(|(height, _)| *height > tip_height);
+    let ahead_backbone = backbone_views
+        .iter()
+        .any(|(height, _)| *height > tip_height);
     let far_lagging_backbone = backbone_views
         .iter()
         .any(|(height, _)| height.saturating_add(1) < tip_height);
@@ -432,9 +448,15 @@ pub fn launch_guard_local_submit_ready(
             block_height, backbone_peers, min_backbone_peers
         ));
     }
-    let official_ahead = backbone_views.iter().any(|(height, _)| *height > block_height);
+    let official_ahead = backbone_views
+        .iter()
+        .any(|(height, _)| *height > block_height);
     if official_ahead {
-        let max_height = backbone_views.iter().map(|(height, _)| *height).max().unwrap_or(0);
+        let max_height = backbone_views
+            .iter()
+            .map(|(height, _)| *height)
+            .max()
+            .unwrap_or(0);
         return Err(format!(
             "launch_guard_official_ahead block_height={} official_max_height={} official_backbone_peers={}",
             block_height, max_height, backbone_peers
@@ -456,7 +478,11 @@ fn log_dial_failed(addr: &str, err: &str) {
     let healthy = bootstrap_has_healthy_peer();
     let transient = is_transient_dial_error(err);
     let interval_secs = if is_transient_dial_error(err) {
-        if healthy { 1800 } else { 300 }
+        if healthy {
+            1800
+        } else {
+            300
+        }
     } else {
         60
     };
@@ -623,9 +649,10 @@ pub fn p2p_public_info() -> serde_json::Value {
     let launch_cfg = cfg()
         .map(|c| Network::parse_name(&c.net).unwrap_or(Network::Mainnet))
         .unwrap_or(Network::Mainnet);
-    let (tip_h, tip_hash32, tip_bits, _) = cfg()
-        .map(|c| tip_fields(&c.data_dir))
-        .unwrap_or((0, "0".repeat(64), 0, 0));
+    let (tip_h, tip_hash32, tip_bits, _) =
+        cfg()
+            .map(|c| tip_fields(&c.data_dir))
+            .unwrap_or((0, "0".repeat(64), 0, 0));
     let launch_backbone_peers = launch_guard_backbone_peer_count(launch_cfg) as u64;
     let launch_backbone_heights = launch_guard_backbone_heights(launch_cfg);
     let launch_backbone_hashes: Vec<String> = launch_guard_backbone_views(launch_cfg)
@@ -647,7 +674,9 @@ pub fn p2p_public_info() -> serde_json::Value {
     let launch_guard_detail =
         launch_guard_mining_ready(launch_cfg, tip_h, &tip_hash32, tip_bits).err();
     let network_health_priority = network_health_priority_active();
-    let backbone_tip_lag = launch_backbone_max_height.unwrap_or(0).saturating_sub(tip_h);
+    let backbone_tip_lag = launch_backbone_max_height
+        .unwrap_or(0)
+        .saturating_sub(tip_h);
     let total_resync_requests = st.total_resync_requests.load(Ordering::Relaxed);
     let total_competing_tip_events = st.total_competing_tip_events.load(Ordering::Relaxed);
     let total_official_tip_syncs = st.total_official_tip_syncs.load(Ordering::Relaxed);
@@ -1352,7 +1381,8 @@ fn note_peer_resync(addr: &str, competing_tip: bool, official_tip_sync: bool) {
     let st = state();
     st.total_resync_requests.fetch_add(1, Ordering::Relaxed);
     if competing_tip {
-        st.total_competing_tip_events.fetch_add(1, Ordering::Relaxed);
+        st.total_competing_tip_events
+            .fetch_add(1, Ordering::Relaxed);
     }
     if official_tip_sync {
         st.total_official_tip_syncs.fetch_add(1, Ordering::Relaxed);
@@ -1385,8 +1415,7 @@ fn note_reorg_accept(backbone_tie: bool) {
     let st = state();
     st.total_reorg_accepts.fetch_add(1, Ordering::Relaxed);
     if backbone_tie {
-        st.total_backbone_tie_reorgs
-            .fetch_add(1, Ordering::Relaxed);
+        st.total_backbone_tie_reorgs.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1467,8 +1496,7 @@ fn outbound_peer_quality(addr: &str) -> i64 {
         0
     };
     let backbone_bonus = if official_backbone { 1_000_000 } else { 0 };
-    backbone_bonus
-        + peer.success_count as i64 * 4
+    backbone_bonus + peer.success_count as i64 * 4
         - peer.failure_count as i64 * 3
         - peer.competing_tip_events as i64 * 8
         - peer.resync_requests as i64
@@ -1487,19 +1515,34 @@ fn launch_guard_resync_interval(net: Network, peer: &str) -> Duration {
     }
 }
 
-fn official_tip_sync_from(net: Network, peer: &str, local_h: u64, local_hash32: &str, remote_h: u64, remote_hash32: &str) -> usize {
+fn official_tip_sync_from(
+    net: Network,
+    peer: &str,
+    local_h: u64,
+    local_hash32: &str,
+    remote_h: u64,
+    remote_hash32: &str,
+) -> usize {
     if net == Network::Mainnet
         && is_launch_backbone_peer_for_net(net, peer)
         && (remote_h > local_h || (remote_h == local_h && remote_hash32 != local_hash32))
     {
         if network_health_priority_active() {
-            0
+            health_priority_sync_from(local_h)
         } else {
             reorg_overlap_from(local_h)
         }
     } else {
         (local_h + 1) as usize
     }
+}
+
+fn health_priority_sync_from(local_h: u64) -> usize {
+    let overlap_from = reorg_overlap_from(local_h);
+    let earliest_full_window = local_h
+        .saturating_add(2)
+        .saturating_sub(MAX_BLOCKS_PER_MSG as u64) as usize;
+    overlap_from.min(earliest_full_window)
 }
 
 fn outbound_tick_interval() -> Duration {
@@ -1885,7 +1928,10 @@ fn try_accept_peer(ip: IpAddr) -> Option<PeerGuard> {
 
 fn read_line_limited<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> std::io::Result<usize> {
     buf.clear();
-    let n = reader.by_ref().take((MAX_LINE_BYTES + 1) as u64).read_until(b'\n', buf)?;
+    let n = reader
+        .by_ref()
+        .take((MAX_LINE_BYTES + 1) as u64)
+        .read_until(b'\n', buf)?;
     if n == 0 {
         return Ok(0);
     }
@@ -1971,10 +2017,11 @@ fn connect_peer(addr: &str) -> Result<TcpStream, String> {
             match TcpStream::connect_timeout(&socket, timeout) {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
-                    let retryable = matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) || matches!(e.raw_os_error(), Some(11) | Some(35) | Some(10035));
+                    let retryable =
+                        matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) || matches!(e.raw_os_error(), Some(11) | Some(35) | Some(10035));
                     last_err = Some(e.to_string());
                     if retryable && attempt < CONNECT_TRANSIENT_RETRIES {
                         thread::sleep(Duration::from_millis(CONNECT_TRANSIENT_RETRY_DELAY_MS));
@@ -2151,11 +2198,7 @@ fn penalize_bad_blocks(peer: &str, peer_ip: IpAddr, err: &str, net: &str, data_d
         && Network::parse_name(net)
             .map(|network| {
                 let (tip_height, _, tip_bits, _) = tip_fields(data_dir);
-                netparams::pow_launch_guard_enabled(
-                    network,
-                    tip_height.saturating_add(1),
-                    tip_bits,
-                )
+                netparams::pow_launch_guard_enabled(network, tip_height.saturating_add(1), tip_bits)
                     && is_launch_backbone_peer_for_net(network, peer)
             })
             .unwrap_or(false);
@@ -2376,7 +2419,14 @@ fn handle_peer(
                 note_inbound_peer_tip(&peer, height, &hash32);
                 let (local_h, local_hash32, _bb, _cw) = tip_fields(&data_dir);
                 if height > local_h || (height == local_h && hash32 != local_hash32) {
-                    let from = official_tip_sync_from(network, &peer, local_h, &local_hash32, height, &hash32);
+                    let from = official_tip_sync_from(
+                        network,
+                        &peer,
+                        local_h,
+                        &local_hash32,
+                        height,
+                        &hash32,
+                    );
                     let _ = send_msg(
                         &mut stream,
                         &Msg::GetBlocksFrom {
@@ -2476,7 +2526,10 @@ fn handle_peer(
                             if first.height == tip_h + 1 {
                                 // Likely fork: peer is sending blocks that don't connect to our tip.
                                 // Ask for an overlapping window so we can find the common ancestor and reorg.
-                                if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                                if should_resync(
+                                    &peer,
+                                    launch_guard_resync_interval(network, &peer),
+                                ) {
                                     let from = reorg_overlap_from(tip_h);
                                     let limit = MAX_BLOCKS_PER_MSG;
                                     let _ =
@@ -2490,7 +2543,10 @@ fn handle_peer(
                                 // Out-of-order or different-tip blocks. Don't treat as misbehavior;
                                 // request the expected range from our current tip.
                                 if first.height > tip_h + 1 {
-                                    if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                                    if should_resync(
+                                        &peer,
+                                        launch_guard_resync_interval(network, &peer),
+                                    ) {
                                         let from = (tip_h + 1) as usize;
                                         let limit = 128usize;
                                         let _ = send_msg(
@@ -2559,12 +2615,9 @@ fn handle_peer(
                             let incoming_cw =
                                 store::compute_chainwork_for_candidate(&data_dir, fp, slice)
                                     .unwrap_or(0);
-                            let candidate_tip_height =
-                                slice.last().map(|b| b.height).unwrap_or(fp);
-                            let candidate_tip_hash = slice
-                                .last()
-                                .map(|b| b.hash32.as_str())
-                                .unwrap_or_default();
+                            let candidate_tip_height = slice.last().map(|b| b.height).unwrap_or(fp);
+                            let candidate_tip_hash =
+                                slice.last().map(|b| b.hash32.as_str()).unwrap_or_default();
                             if !should_accept_reorg_candidate(tip_cw, incoming_cw)
                                 && !should_prefer_backbone_tie_candidate(
                                     network,
@@ -2593,7 +2646,9 @@ fn handle_peer(
                                     let n = match try_append_blocks(&data_dir, slice) {
                                         Ok(n) => n,
                                         Err(e) => {
-                                            penalize_bad_blocks(&peer, peer_ip, &e, &net, &data_dir);
+                                            penalize_bad_blocks(
+                                                &peer, peer_ip, &e, &net, &data_dir,
+                                            );
                                             if is_banned(peer_ip) {
                                                 break;
                                             }
@@ -2626,7 +2681,8 @@ fn handle_peer(
                                 if slice.len() >= MAX_BLOCKS_PER_MSG {
                                     let from = last.height.saturating_add(1) as usize;
                                     let limit = MAX_BLOCKS_PER_MSG;
-                                    let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                    let _ =
+                                        send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
                                     note_peer_resync(&peer, false, false);
                                     dlog!(
                                         "p2p: resync_request peer={} from={} limit={} reason=continue_sync",
@@ -2651,12 +2707,12 @@ fn handle_peer(
                 if block.height == tip_h + 1 && prev == tip_hash {
                     // ok normal extension
                 } else {
-                        if block.height == tip_h + 1 {
-                            if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
-                                let from = reorg_overlap_from(tip_h);
-                                let limit = MAX_BLOCKS_PER_MSG;
-                                let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
-                                note_peer_resync(&peer, false, false);
+                    if block.height == tip_h + 1 {
+                        if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                            let from = reorg_overlap_from(tip_h);
+                            let limit = MAX_BLOCKS_PER_MSG;
+                            let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                            note_peer_resync(&peer, false, false);
                             dlog!(
                                 "p2p: resync_request peer={} from={} limit={} reason=bad_prevhash",
                                 peer,
@@ -2746,7 +2802,10 @@ fn handle_peer(
                             if block.height == tip_h {
                                 if let Some(local_tip) = store::block_at(&data_dir, tip_h) {
                                     if local_tip.hash32 != block.hash32 {
-                                        if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                                        if should_resync(
+                                            &peer,
+                                            launch_guard_resync_interval(network, &peer),
+                                        ) {
                                             let from = tip_h.saturating_sub(1) as usize;
                                             let limit = MAX_BLOCKS_PER_MSG;
                                             let _ = send_msg(
@@ -3003,10 +3062,8 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                         .unwrap_or(0);
                                 let candidate_tip_height =
                                     slice.last().map(|b| b.height).unwrap_or(fp_h);
-                                let candidate_tip_hash = slice
-                                    .last()
-                                    .map(|b| b.hash32.as_str())
-                                    .unwrap_or_default();
+                                let candidate_tip_hash =
+                                    slice.last().map(|b| b.hash32.as_str()).unwrap_or_default();
                                 if should_accept_reorg_candidate(tip_cw, incoming_cw)
                                     || should_prefer_backbone_tie_candidate(
                                         network,
@@ -3088,7 +3145,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
             }
             Err(e) => {
                 let err = e.to_string();
-                    note_outbound_peer_result(addr, false, None, None, Some(&err));
+                note_outbound_peer_result(addr, false, None, None, Some(&err));
                 return Err(err);
             }
         }
@@ -3108,11 +3165,7 @@ pub fn broadcast_block(block: &ChainBlock) {
         bits: block.bits,
     };
     let mut sent = 0usize;
-    let targets = select_block_broadcast_targets(
-        &outbound_candidates(),
-        &cfg.port,
-        &cfg.local_ip,
-    );
+    let targets = select_block_broadcast_targets(&outbound_candidates(), &cfg.port, &cfg.local_ip);
     let now = Instant::now();
     for addr in targets.iter() {
         let state = BLOCK_BROADCAST_STATE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -3151,11 +3204,8 @@ pub fn broadcast_block(block: &ChainBlock) {
                     block: block.clone(),
                 },
             );
-            let _ = serve_broadcast_followups(
-                &mut stream,
-                &cfg.data_dir,
-                broadcast_followup_wait(),
-            );
+            let _ =
+                serve_broadcast_followups(&mut stream, &cfg.data_dir, broadcast_followup_wait());
             sent += 1;
         }
     }
@@ -3353,11 +3403,12 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 #[cfg(test)]
 mod tests {
     use super::{
-        ban_peer_manual, canonicalize_peer_token, is_transient_dial_error, list_banned_json,
-        launch_guard_local_submit_ready, launch_guard_mining_ready, normalize_bootstrap_candidates, parse_peers_text,
-        official_tip_sync_from, read_line_limited, reorg_overlap_from, should_accept_reorg_candidate, subnet24_key,
-        should_prefer_backbone_tie_candidate, unban_peer_manual, validate_block_basic,
-        MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
+        ban_peer_manual, canonicalize_peer_token, is_transient_dial_error,
+        health_priority_sync_from, launch_guard_local_submit_ready, launch_guard_mining_ready,
+        list_banned_json, normalize_bootstrap_candidates, official_tip_sync_from, parse_peers_text,
+        read_line_limited, reorg_overlap_from, should_accept_reorg_candidate,
+        should_prefer_backbone_tie_candidate, subnet24_key, unban_peer_manual,
+        validate_block_basic, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
     use duta_core::netparams::Network;
@@ -3457,13 +3508,8 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let err = launch_guard_local_submit_ready(
-            Network::Mainnet,
-            26,
-            &"33".repeat(32),
-            22,
-        )
-        .unwrap_err();
+        let err = launch_guard_local_submit_ready(Network::Mainnet, 26, &"33".repeat(32), 22)
+            .unwrap_err();
         assert!(err.starts_with("launch_guard_competing_official_tip"));
     }
 
@@ -3485,12 +3531,7 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let ready = launch_guard_local_submit_ready(
-            Network::Mainnet,
-            26,
-            &"22".repeat(32),
-            22,
-        );
+        let ready = launch_guard_local_submit_ready(Network::Mainnet, 26, &"22".repeat(32), 22);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
@@ -3554,7 +3595,9 @@ mod tests {
 
     #[test]
     fn transient_dial_error_classification_matches_expected_strings() {
-        assert!(is_transient_dial_error("Resource temporarily unavailable (os error 11)"));
+        assert!(is_transient_dial_error(
+            "Resource temporarily unavailable (os error 11)"
+        ));
         assert!(is_transient_dial_error("operation would block"));
         assert!(is_transient_dial_error("timed out"));
         assert!(!is_transient_dial_error("connection refused"));
@@ -3653,7 +3696,10 @@ mod tests {
     fn subnet24_key_ignores_private_and_loopback_ranges() {
         assert_eq!(subnet24_key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), None);
         assert_eq!(subnet24_key(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))), None);
-        assert_eq!(subnet24_key(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))), None);
+        assert_eq!(
+            subnet24_key(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            None
+        );
     }
 
     #[test]
@@ -3688,23 +3734,34 @@ mod tests {
     #[test]
     fn manual_ban_and_unban_round_trip() {
         let banned = ban_peer_manual("203.0.113.9", Some("test")).unwrap();
-        assert_eq!(banned.get("ip").and_then(|v| v.as_str()), Some("203.0.113.9"));
+        assert_eq!(
+            banned.get("ip").and_then(|v| v.as_str()),
+            Some("203.0.113.9")
+        );
         let list = list_banned_json();
         let arr = list.as_array().cloned().unwrap_or_default();
-        assert!(arr.iter().any(|v| v.get("ip").and_then(|x| x.as_str()) == Some("203.0.113.9")));
+        assert!(arr
+            .iter()
+            .any(|v| v.get("ip").and_then(|x| x.as_str()) == Some("203.0.113.9")));
 
         let unbanned = unban_peer_manual("203.0.113.9").unwrap();
-        assert_eq!(unbanned.get("removed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            unbanned.get("removed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         let list = list_banned_json();
         let arr = list.as_array().cloned().unwrap_or_default();
-        assert!(!arr.iter().any(|v| v.get("ip").and_then(|x| x.as_str()) == Some("203.0.113.9")));
+        assert!(!arr
+            .iter()
+            .any(|v| v.get("ip").and_then(|x| x.as_str()) == Some("203.0.113.9")));
     }
 
     #[test]
     fn launch_guard_requires_official_backbone_peer_on_mainnet() {
         let _guard = launch_guard_test_lock().lock().unwrap();
         clear_test_peer_state();
-        let err = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err =
+            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("launch_guard_official_peer_insufficient"));
     }
 
@@ -3719,7 +3776,8 @@ mod tests {
             Some(&"11".repeat(32)),
             None,
         );
-        let err = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err =
+            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.contains("official_backbone_peers=1"));
         super::note_outbound_peer_result(
             "seed2.dutago.xyz:19082",
@@ -3762,7 +3820,8 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let err = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err =
+            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("launch_guard_official_tip_mismatch"));
     }
 
@@ -3836,7 +3895,14 @@ mod tests {
     fn official_tip_sync_uses_overlap_for_official_ahead_or_conflicting_tip() {
         clear_test_peer_state();
         assert_eq!(
-            official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 10, &"aa".repeat(32), 11, &"bb".repeat(32)),
+            official_tip_sync_from(
+                Network::Mainnet,
+                "seed1.dutago.xyz:19082",
+                10,
+                &"aa".repeat(32),
+                11,
+                &"bb".repeat(32)
+            ),
             0usize
         );
         super::note_outbound_peer_result(
@@ -3854,17 +3920,39 @@ mod tests {
             None,
         );
         assert_eq!(
-            official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 21, &"aa".repeat(32), 22, &"bb".repeat(32)),
+            official_tip_sync_from(
+                Network::Mainnet,
+                "seed1.dutago.xyz:19082",
+                21,
+                &"aa".repeat(32),
+                22,
+                &"bb".repeat(32)
+            ),
             reorg_overlap_from(21)
         );
         assert_eq!(
-            official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 21, &"aa".repeat(32), 21, &"bb".repeat(32)),
+            official_tip_sync_from(
+                Network::Mainnet,
+                "seed1.dutago.xyz:19082",
+                21,
+                &"aa".repeat(32),
+                21,
+                &"bb".repeat(32)
+            ),
             reorg_overlap_from(21)
         );
         assert_eq!(
-            official_tip_sync_from(Network::Mainnet, "198.51.100.10:19082", 21, &"aa".repeat(32), 22, &"bb".repeat(32)),
+            official_tip_sync_from(
+                Network::Mainnet,
+                "198.51.100.10:19082",
+                21,
+                &"aa".repeat(32),
+                22,
+                &"bb".repeat(32)
+            ),
             22usize
         );
+        assert_eq!(health_priority_sync_from(128), 2usize);
     }
 
     #[test]
@@ -3885,7 +3973,8 @@ mod tests {
             Some(&"88".repeat(32)),
             None,
         );
-        let err = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err =
+            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("launch_guard_official_tip_mismatch"));
     }
 
@@ -3907,7 +3996,8 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let err = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err =
+            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("launch_guard_official_tip_mismatch"));
     }
 
@@ -3946,7 +4036,8 @@ mod tests {
             Some(&"11".repeat(32)),
             None,
         );
-        let err = launch_guard_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22).unwrap_err();
+        let err =
+            launch_guard_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22).unwrap_err();
         assert!(
             err.starts_with("launch_guard_syncing")
                 || err.starts_with("launch_guard_official_peer_insufficient")
