@@ -184,8 +184,7 @@ fn launch_guard_backbone_targets(net: Network) -> Vec<String> {
 const LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS: u64 = 30;
 const LAUNCH_GUARD_RESYNC_INTERVAL_MS: u64 = 500;
 const LAUNCH_GUARD_DIAL_INTERVAL_SECS: u64 = 1;
-const EARLY_BOOTSTRAP_FULL_SYNC_HEIGHT: u64 = 16;
-const EARLY_BOOTSTRAP_PRIORITY_HEIGHT: u64 = 32;
+const HEALTH_SYNC_PRIORITY_HEIGHT: u64 = 16;
 
 pub fn launch_guard_user_detail(detail: &str) -> &'static str {
     if detail.starts_with("launch_guard_syncing") {
@@ -280,6 +279,18 @@ fn launch_guard_active_now() -> bool {
     let (tip_height, tip_hash32, tip_bits, _) = tip_fields(&cfg.data_dir);
     netparams::pow_launch_guard_enabled(net, tip_height.saturating_add(1), tip_bits)
         || launch_guard_unhealthy(net, tip_height, &tip_hash32)
+}
+
+fn network_health_priority_active() -> bool {
+    let Some(cfg) = cfg() else {
+        return false;
+    };
+    let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
+    if net != Network::Mainnet {
+        return false;
+    }
+    let (tip_height, tip_hash32, _tip_bits, _tip_cw) = tip_fields(&cfg.data_dir);
+    tip_height <= HEALTH_SYNC_PRIORITY_HEIGHT || launch_guard_unhealthy(net, tip_height, &tip_hash32)
 }
 
 fn is_launch_backbone_peer_for_net(net: Network, addr: &str) -> bool {
@@ -1369,7 +1380,7 @@ fn official_tip_sync_from(net: Network, peer: &str, local_h: u64, local_hash32: 
         && is_launch_backbone_peer_for_net(net, peer)
         && (remote_h > local_h || (remote_h == local_h && remote_hash32 != local_hash32))
     {
-        if local_h <= EARLY_BOOTSTRAP_FULL_SYNC_HEIGHT {
+        if network_health_priority_active() {
             0
         } else {
             reorg_overlap_from(local_h)
@@ -1379,20 +1390,8 @@ fn official_tip_sync_from(net: Network, peer: &str, local_h: u64, local_hash32: 
     }
 }
 
-fn early_bootstrap_priority_active() -> bool {
-    let Some(cfg) = cfg() else {
-        return false;
-    };
-    let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
-    if net != Network::Mainnet {
-        return false;
-    }
-    let (tip_height, _tip_hash32, _tip_bits, _tip_cw) = tip_fields(&cfg.data_dir);
-    tip_height <= EARLY_BOOTSTRAP_PRIORITY_HEIGHT
-}
-
 fn outbound_tick_interval() -> Duration {
-    if early_bootstrap_priority_active() {
+    if network_health_priority_active() {
         Duration::from_millis(500)
     } else if launch_guard_active_now() {
         Duration::from_secs(LAUNCH_GUARD_DIAL_INTERVAL_SECS)
@@ -3621,9 +3620,24 @@ mod tests {
 
     #[test]
     fn official_tip_sync_uses_overlap_for_official_ahead_or_conflicting_tip() {
+        clear_test_peer_state();
         assert_eq!(
             official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 10, &"aa".repeat(32), 11, &"bb".repeat(32)),
             0usize
+        );
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(21),
+            Some(&"aa".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(21),
+            Some(&"aa".repeat(32)),
+            None,
         );
         assert_eq!(
             official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 21, &"aa".repeat(32), 22, &"bb".repeat(32)),
