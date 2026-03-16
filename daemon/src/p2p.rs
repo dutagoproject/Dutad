@@ -185,6 +185,7 @@ const LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS: u64 = 30;
 const LAUNCH_GUARD_RESYNC_INTERVAL_MS: u64 = 500;
 const LAUNCH_GUARD_DIAL_INTERVAL_SECS: u64 = 1;
 const EARLY_BOOTSTRAP_FULL_SYNC_HEIGHT: u64 = 16;
+const EARLY_BOOTSTRAP_PRIORITY_HEIGHT: u64 = 32;
 
 pub fn launch_guard_user_detail(detail: &str) -> &'static str {
     if detail.starts_with("launch_guard_syncing") {
@@ -1378,8 +1379,22 @@ fn official_tip_sync_from(net: Network, peer: &str, local_h: u64, local_hash32: 
     }
 }
 
+fn early_bootstrap_priority_active() -> bool {
+    let Some(cfg) = cfg() else {
+        return false;
+    };
+    let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
+    if net != Network::Mainnet {
+        return false;
+    }
+    let (tip_height, _tip_hash32, _tip_bits, _tip_cw) = tip_fields(&cfg.data_dir);
+    tip_height <= EARLY_BOOTSTRAP_PRIORITY_HEIGHT
+}
+
 fn outbound_tick_interval() -> Duration {
-    if launch_guard_active_now() {
+    if early_bootstrap_priority_active() {
+        Duration::from_millis(500)
+    } else if launch_guard_active_now() {
         Duration::from_secs(LAUNCH_GUARD_DIAL_INTERVAL_SECS)
     } else {
         Duration::from_secs(2)
@@ -1414,8 +1429,34 @@ fn select_outbound_targets(
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    scored.truncate(limit);
-    scored.into_iter().map(|(_, addr)| addr).collect()
+    let official_net = cfg()
+        .and_then(|cfg| Network::parse_name(&cfg.net))
+        .unwrap_or(Network::Mainnet);
+    let mut official = Vec::new();
+    let mut other = Vec::new();
+    for (_, addr) in scored.into_iter() {
+        if is_launch_backbone_peer_for_net(official_net, &addr) {
+            official.push(addr);
+        } else {
+            other.push(addr);
+        }
+    }
+    let mut out = Vec::new();
+    for addr in official.into_iter() {
+        if out.len() >= limit {
+            break;
+        }
+        out.push(addr);
+    }
+    if out.len() < limit {
+        for addr in other.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            out.push(addr);
+        }
+    }
+    out
 }
 
 fn outbound_quarantined_peers_json() -> Vec<serde_json::Value> {
@@ -3375,6 +3416,24 @@ mod tests {
             "18082",
         );
         assert_eq!(out, vec!["localhost:18082".to_string()]);
+    }
+
+    #[test]
+    fn select_outbound_targets_prioritizes_official_backbone_peers() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        let targets = super::select_outbound_targets(
+            &[
+                "198.51.100.10:19082".to_string(),
+                "seed1.dutago.xyz:19082".to_string(),
+                "seed2.dutago.xyz:19082".to_string(),
+            ],
+            "19082",
+            "",
+            2,
+        );
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|addr| addr.starts_with("seed")));
     }
 
     #[test]
