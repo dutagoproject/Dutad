@@ -808,6 +808,9 @@ struct PeerSnapshot {
     last_error: Option<String>,
     success_count: u64,
     failure_count: u64,
+    resync_requests: u64,
+    competing_tip_events: u64,
+    official_tip_syncs: u64,
 }
 
 impl PeerSnapshot {
@@ -823,6 +826,9 @@ impl PeerSnapshot {
             last_error: None,
             success_count: 0,
             failure_count: 0,
+            resync_requests: 0,
+            competing_tip_events: 0,
+            official_tip_syncs: 0,
         }
     }
 }
@@ -1322,6 +1328,31 @@ fn note_outbound_peer_result(
     bounded_peer_map_insert(&mut peers, addr.to_string(), entry, OUTBOUND_RECENT_MAX);
 }
 
+fn note_peer_resync(addr: &str, competing_tip: bool, official_tip_sync: bool) {
+    if let Ok(mut peers) = state().outbound_recent.lock() {
+        if let Some(peer) = peers.get_mut(addr) {
+            peer.resync_requests = peer.resync_requests.saturating_add(1);
+            if competing_tip {
+                peer.competing_tip_events = peer.competing_tip_events.saturating_add(1);
+            }
+            if official_tip_sync {
+                peer.official_tip_syncs = peer.official_tip_syncs.saturating_add(1);
+            }
+        }
+    }
+    if let Ok(mut peers) = state().inbound_live.lock() {
+        if let Some(peer) = peers.get_mut(addr) {
+            peer.resync_requests = peer.resync_requests.saturating_add(1);
+            if competing_tip {
+                peer.competing_tip_events = peer.competing_tip_events.saturating_add(1);
+            }
+            if official_tip_sync {
+                peer.official_tip_syncs = peer.official_tip_syncs.saturating_add(1);
+            }
+        }
+    }
+}
+
 fn peer_snapshot_json(peer: &PeerSnapshot) -> serde_json::Value {
     json!({
         "addr": peer.addr,
@@ -1332,7 +1363,10 @@ fn peer_snapshot_json(peer: &PeerSnapshot) -> serde_json::Value {
         "last_tip_hash32": peer.last_tip_hash32,
         "last_error": peer.last_error,
         "success_count": peer.success_count,
-        "failure_count": peer.failure_count
+        "failure_count": peer.failure_count,
+        "resync_requests": peer.resync_requests,
+        "competing_tip_events": peer.competing_tip_events,
+        "official_tip_syncs": peer.official_tip_syncs
     })
 }
 
@@ -1399,6 +1433,9 @@ fn outbound_peer_quality(addr: &str) -> i64 {
     backbone_bonus
         + peer.success_count as i64 * 4
         - peer.failure_count as i64 * 3
+        - peer.competing_tip_events as i64 * 8
+        - peer.resync_requests as i64
+        + peer.official_tip_syncs as i64 * 6
         + peer.last_tip_height as i64 / 1024
         + recency_bonus
 }
@@ -2290,6 +2327,7 @@ fn handle_peer(
                             limit: MAX_BLOCKS_PER_MSG,
                         },
                     );
+                    note_peer_resync(&peer, false, true);
                 }
             }
             Msg::GetBlocksFrom { from, limit } => {
@@ -2386,6 +2424,7 @@ fn handle_peer(
                                     let limit = MAX_BLOCKS_PER_MSG;
                                     let _ =
                                         send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                    note_peer_resync(&peer, false, false);
                                     dlog!("p2p: resync_request peer={} from={} limit={} reason=bad_prevhash", peer, from, limit);
                                 }
                                 continue;
@@ -2401,6 +2440,7 @@ fn handle_peer(
                                             &mut stream,
                                             &Msg::GetBlocksFrom { from, limit },
                                         );
+                                        note_peer_resync(&peer, false, false);
                                         dlog!("p2p: resync_request peer={} from={} limit={} reason=out_of_order", peer, from, limit);
                                     }
                                     dlog!("p2p: out_of_order blocks peer={} first_height={} expected={}", peer, first.height, tip_h + 1);
@@ -2526,6 +2566,7 @@ fn handle_peer(
                                     let from = last.height.saturating_add(1) as usize;
                                     let limit = MAX_BLOCKS_PER_MSG;
                                     let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                    note_peer_resync(&peer, false, false);
                                     dlog!(
                                         "p2p: resync_request peer={} from={} limit={} reason=continue_sync",
                                         peer,
@@ -2554,6 +2595,7 @@ fn handle_peer(
                                 let from = reorg_overlap_from(tip_h);
                                 let limit = MAX_BLOCKS_PER_MSG;
                                 let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                note_peer_resync(&peer, false, false);
                             dlog!(
                                 "p2p: resync_request peer={} from={} limit={} reason=bad_prevhash",
                                 peer,
@@ -2619,6 +2661,7 @@ fn handle_peer(
                                 let from = (tip_h + 1) as usize;
                                 let limit = 128usize;
                                 let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                note_peer_resync(&peer, false, false);
                                 dlog!("p2p: resync_request peer={} from={} limit={} reason=out_of_order", peer, from, limit);
                             }
                             dlog!(
@@ -2645,6 +2688,7 @@ fn handle_peer(
                                                 &mut stream,
                                                 &Msg::GetBlocksFrom { from, limit },
                                             );
+                                            note_peer_resync(&peer, true, false);
                                             dlog!(
                                                 "p2p: resync_request peer={} from={} limit={} reason=competing_tip height={} local_tip={} peer_tip={}",
                                                 peer,
@@ -2808,6 +2852,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                         limit: MAX_BLOCKS_PER_MSG,
                                     },
                                 );
+                                note_peer_resync(addr, false, true);
                             }
                         }
                         Msg::Blocks { blocks } => {
@@ -2958,6 +3003,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                 // Keep limit modest; dial loop runs often.
                                 let limit = MAX_BLOCKS_PER_MSG;
                                 let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                note_peer_resync(addr, false, false);
                                 dlog!(
                                 "p2p: resync_request peer={} from={} limit={} reason=bad_prevhash tip_h={} tip_bits={} tip_cw={}",
                                 addr, from, limit, tip_h, tip_bits, tip_cw
@@ -3410,6 +3456,9 @@ mod tests {
                         last_error: None,
                         success_count: 1,
                         failure_count: 0,
+                        resync_requests: 0,
+                        competing_tip_events: 0,
+                        official_tip_syncs: 0,
                     },
                 );
             }
