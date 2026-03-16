@@ -503,8 +503,13 @@ fn explain_work_fetch_reject(http_code: Option<u16>, body: &str) {
         "launch_guard_not_ready" => {
             let msg = if detail.contains("launch_guard_solo_bootstrap") {
                 "solo mining is temporarily limited during early launch"
+            } else if detail.contains("launch_guard_official_tip_mismatch")
+                || detail.contains("launch_guard_competing_official_tip")
+                || detail.contains("launch_guard_official_ahead")
+            {
+                "work update pending: waiting for official chain sync"
             } else {
-                "work update pending: waiting for network tip to settle"
+                "work update pending: waiting for launch sync"
             };
             log_work_reject_once(msg);
         }
