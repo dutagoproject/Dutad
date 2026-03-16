@@ -171,6 +171,81 @@ fn orphan_add(mp: &mut serde_json::Value, txid: &str, tx: &serde_json::Value, by
     orphan_prune(mp, now);
 }
 
+fn enforce_mempool_caps(mp: &mut serde_json::Value) -> HashSet<String> {
+    let mut removed: HashSet<String> = HashSet::new();
+    loop {
+        let txs_obj = match mp.get("txs").and_then(|x| x.as_object()) {
+            Some(o) => o,
+            None => break,
+        };
+        let cur_count = txs_obj.len();
+        let mut cur_bytes: usize = 0;
+        for (_k, v) in txs_obj.iter() {
+            if let Ok(b) = serde_json::to_vec(v) {
+                cur_bytes = cur_bytes.saturating_add(b.len());
+            }
+        }
+        if cur_count <= MAX_MEMPOOL_TXS && cur_bytes <= MAX_MEMPOOL_BYTES {
+            break;
+        }
+
+        let mut candidates: Vec<(String, u64, usize)> = Vec::new();
+        for (k, v) in txs_obj.iter() {
+            let fee_k = v.get("fee").and_then(|x| x.as_u64()).unwrap_or(0);
+            let sz0 = v.get("size").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+            let sz = if sz0 == 0 {
+                serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
+            } else {
+                sz0
+            };
+            candidates.push((k.clone(), fee_k, sz));
+        }
+
+        candidates.sort_by(|a, b| {
+            match feerate_cmp(a.1, a.2, b.1, b.2) {
+                std::cmp::Ordering::Equal => match a.1.cmp(&b.1) {
+                    std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                    o => o,
+                },
+                o => o,
+            }
+        });
+
+        if let Some((victim, _vf, _vs)) = candidates.first().cloned() {
+            let _ = remove_tx_from_mempool(mp, &victim);
+            removed.insert(victim);
+        } else {
+            break;
+        }
+    }
+    removed
+}
+
+fn rebuild_mempool_txids(mp: &mut serde_json::Value) {
+    let txs_obj = mp
+        .get("txs")
+        .and_then(|x| x.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let mut new_txids: Vec<serde_json::Value> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if let Some(old) = mp.get("txids").and_then(|x| x.as_array()) {
+        for v in old {
+            if let Some(t) = v.as_str() {
+                if txs_obj.contains_key(t) && seen.insert(t.to_string()) {
+                    new_txids.push(json!(t));
+                }
+            }
+        }
+    }
+    for k in txs_obj.keys() {
+        if seen.insert(k.clone()) {
+            new_txids.push(json!(k));
+        }
+    }
+    mp["txids"] = serde_json::Value::Array(new_txids);
+}
+
 fn orphan_try_promote(data_dir: &str, mp: &mut serde_json::Value) {
     ensure_orphan_shape(mp);
     let txids = mp["orphans"]["txids"]
@@ -231,6 +306,12 @@ fn orphan_try_promote(data_dir: &str, mp: &mut serde_json::Value) {
             }
         }
         mp["orphans"]["txids"] = json!(keep);
+
+        let removed = enforce_mempool_caps(mp);
+        if !removed.is_empty() {
+            promoted.retain(|txid| !removed.contains(txid));
+        }
+        rebuild_mempool_txids(mp);
     }
 }
 
@@ -607,79 +688,8 @@ pub fn ingest_tx(
 
         // Enforce mempool caps with eviction of lowest-fee txs (deterministic).
         // If the incoming tx gets evicted, treat as mempool_full.
-        let mut removed: HashSet<String> = HashSet::new();
-        loop {
-            let txs_obj = match mp.get("txs").and_then(|x| x.as_object()) {
-                Some(o) => o,
-                None => break,
-            };
-            let cur_count = txs_obj.len();
-            let mut cur_bytes: usize = 0;
-            for (_k, v) in txs_obj.iter() {
-                if let Ok(b) = serde_json::to_vec(v) {
-                    cur_bytes = cur_bytes.saturating_add(b.len());
-                }
-            }
-            if cur_count <= MAX_MEMPOOL_TXS && cur_bytes <= MAX_MEMPOOL_BYTES {
-                break;
-            }
-
-            // Build candidates (txid, fee, size)
-            let mut candidates: Vec<(String, u64, usize)> = Vec::new();
-            for (k, v) in txs_obj.iter() {
-                let fee_k = v.get("fee").and_then(|x| x.as_u64()).unwrap_or(0);
-                let sz0 = v.get("size").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                let sz = if sz0 == 0 {
-                    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
-                } else {
-                    sz0
-                };
-                candidates.push((k.clone(), fee_k, sz));
-            }
-
-            candidates.sort_by(|a, b| {
-                // feerate asc (fee/size), then fee asc, then txid lex asc
-                match feerate_cmp(a.1, a.2, b.1, b.2) {
-                    std::cmp::Ordering::Equal => match a.1.cmp(&b.1) {
-                        std::cmp::Ordering::Equal => a.0.cmp(&b.0),
-                        o => o,
-                    },
-                    o => o,
-                }
-            });
-
-            if let Some((victim, _vf, _vs)) = candidates.first().cloned() {
-                let _ = remove_tx_from_mempool(&mut mp, &victim);
-                removed.insert(victim);
-            } else {
-                break;
-            }
-        }
-
-        // Rebuild txids array to match remaining txs.
-        let txs_obj = mp
-            .get("txs")
-            .and_then(|x| x.as_object())
-            .cloned()
-            .unwrap_or_default();
-        let mut new_txids: Vec<serde_json::Value> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        if let Some(old) = mp.get("txids").and_then(|x| x.as_array()) {
-            for v in old {
-                if let Some(t) = v.as_str() {
-                    if txs_obj.contains_key(t) && seen.insert(t.to_string()) {
-                        new_txids.push(json!(t));
-                    }
-                }
-            }
-        }
-        // Add any txs not present in txids (should not happen but keep consistent).
-        for k in txs_obj.keys() {
-            if seen.insert(k.clone()) {
-                new_txids.push(json!(k));
-            }
-        }
-        mp["txids"] = serde_json::Value::Array(new_txids);
+        enforce_mempool_caps(&mut mp);
+        rebuild_mempool_txids(&mut mp);
 
         if mp["txs"].get(&txid).is_none() {
             return Err("mempool_full".to_string());
@@ -838,7 +848,9 @@ pub fn handle_submit_tx(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_submit_tx_request, txid_is_valid};
+    use super::{
+        enforce_mempool_caps, rebuild_mempool_txids, parse_submit_tx_request, txid_is_valid,
+    };
     use serde_json::json;
 
     #[test]
@@ -888,5 +900,40 @@ mod tests {
             })),
             Err("txid_mismatch")
         );
+    }
+
+    #[test]
+    fn mempool_cap_enforcement_rebuilds_txids_after_eviction() {
+        let mut txids = Vec::new();
+        let mut txs = serde_json::Map::new();
+        for idx in 0..=super::MAX_MEMPOOL_TXS {
+            let txid = format!("{idx:064x}");
+            txids.push(json!(txid.clone()));
+            txs.insert(
+                txid.clone(),
+                json!({
+                    "vin":[{"txid":"a","vout":idx as u64}],
+                    "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}],
+                    "fee": idx as u64,
+                    "size": 1
+                }),
+            );
+        }
+        let mut mp = json!({
+            "txids": txids,
+            "txs": txs
+        });
+
+        let removed = enforce_mempool_caps(&mut mp);
+        assert_eq!(removed.len(), 1);
+
+        rebuild_mempool_txids(&mut mp);
+        let txids = mp["txids"].as_array().cloned().unwrap_or_default();
+        assert_eq!(txids.len(), super::MAX_MEMPOOL_TXS);
+        assert_eq!(mp["txs"].as_object().map(|o| o.len()), Some(super::MAX_MEMPOOL_TXS));
+        for txid in txids {
+            let key = txid.as_str().expect("txid string");
+            assert!(mp["txs"].get(key).is_some());
+        }
     }
 }
