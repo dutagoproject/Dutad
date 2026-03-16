@@ -390,10 +390,18 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 .get("reason")
                 .and_then(|x| x.as_str())
                 .unwrap_or("invalid");
+            let detail = v.get("detail").and_then(|x| x.as_str()).unwrap_or("");
             let msg = v
                 .get("message")
                 .and_then(|x| x.as_str())
                 .unwrap_or("Share rejected.");
+            if is_sync_submit_reject(reason, detail, msg) {
+                println!(
+                    "share update pending: waiting for chain sync; miner will retry automatically. hash={}",
+                    mined_hash32
+                );
+                return;
+            }
             println!("REJECTED share: {} hash={}", msg, mined_hash32);
             println!("reason={}", reason);
             println!("raw={}", body);
@@ -430,7 +438,12 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
             println!("raw={}", body);
         }
         "accept_failed" => {
-            if detail.contains("stale_or_out_of_order_block") {
+            if is_sync_submit_reject(err, detail, detail) {
+                println!(
+                    "share update pending: waiting for chain sync; miner will retry automatically. hash={}",
+                    mined_hash32
+                );
+            } else if detail.contains("stale_or_out_of_order_block") {
                 println!("REJECTED share: Share rejected: stale share (submitted too late). Please fetch new work and try again. hash={}", mined_hash32);
                 println!("reason=stale");
             } else if detail.contains("bad_prevhash") || detail.contains("bits_invalid") {
@@ -468,6 +481,14 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
             println!("raw={}", body);
         }
     }
+}
+
+fn is_sync_submit_reject(reason: &str, detail: &str, message: &str) -> bool {
+    reason.contains("launch_guard")
+        || detail.contains("launch_guard_")
+        || detail.contains("waiting_for_official_chain_sync")
+        || message.contains("waiting for official chain sync")
+        || message.contains("waiting for launch sync")
 }
 
 fn work_retry_delay_ms(http_code: Option<u16>, body: &str, poll_ms: u64) -> u64 {
