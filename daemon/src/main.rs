@@ -535,6 +535,15 @@ fn counters_for_kind_ip_mut<'a>(c: &'a mut RateCounters, kind: &str) -> Option<(
     }
 }
 
+fn per_ip_rate_limit(kind: &str, private_work_burst: bool) -> Option<u32> {
+    let (_, ip_max) = counters_for_kind_ip_mut(&mut RateCounters::default(), kind)?;
+    Some(if kind == "work" && private_work_burst {
+        WORK_MAX_PER_PRIVATE_IP_PER_SEC
+    } else {
+        ip_max
+    })
+}
+
 fn rate_allow(request: &tiny_http::Request, kind: &str) -> bool {
     let sec = now_sec();
     let ip = request_ip_key(request);
@@ -560,11 +569,8 @@ fn rate_allow(request: &tiny_http::Request, kind: &str) -> bool {
         let Some((ip_ctr, ip_max)) = counters_for_kind_ip_mut(ip_state, kind) else {
             return true;
         };
-        let ip_max = if request_allows_private_work_burst(request, kind) {
-            WORK_MAX_PER_PRIVATE_IP_PER_SEC
-        } else {
-            ip_max
-        };
+        let ip_max = per_ip_rate_limit(kind, request_allows_private_work_burst(request, kind))
+            .unwrap_or(ip_max);
         if *ip_ctr >= ip_max {
             return false;
         }
@@ -2202,7 +2208,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_path_requires_loopback, blocks_from_json, ip_is_loopback_or_private, Args, ChainBlock};
+    use super::{
+        admin_path_requires_loopback, blocks_from_json, ip_is_loopback_or_private,
+        per_ip_rate_limit, Args, ChainBlock, SUBMIT_MAX_PER_IP_PER_SEC,
+        WORK_MAX_PER_PRIVATE_IP_PER_SEC,
+    };
     use crate::store;
     use clap::Parser;
     use serde_json::json;
@@ -2248,6 +2258,22 @@ mod tests {
         assert!(!ip_is_loopback_or_private(IpAddr::V4(Ipv4Addr::new(
             8, 8, 8, 8
         ))));
+    }
+
+    #[test]
+    fn private_work_burst_does_not_relax_submit_limit() {
+        assert_eq!(
+            per_ip_rate_limit("work", true),
+            Some(WORK_MAX_PER_PRIVATE_IP_PER_SEC)
+        );
+        assert_eq!(
+            per_ip_rate_limit("submit", true),
+            Some(SUBMIT_MAX_PER_IP_PER_SEC)
+        );
+        assert_eq!(
+            per_ip_rate_limit("submit", false),
+            Some(SUBMIT_MAX_PER_IP_PER_SEC)
+        );
     }
 
     fn temp_datadir(tag: &str) -> String {
