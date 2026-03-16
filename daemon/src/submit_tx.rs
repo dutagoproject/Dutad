@@ -507,6 +507,7 @@ fn parse_submit_tx_request(
     if !tx.is_object() {
         return Err("invalid_tx");
     }
+    let canonical_txid = txid_from_value(tx).map_err(|_| "invalid_tx")?;
     let txid = v
         .get("txid")
         .and_then(|x| x.as_str())
@@ -516,9 +517,12 @@ fn parse_submit_tx_request(
         if !txid_is_valid(txid) {
             return Err("invalid_txid");
         }
-        return Ok((tx.clone(), Some(txid.to_string())));
+        if !txid.eq_ignore_ascii_case(&canonical_txid) {
+            return Err("txid_mismatch");
+        }
+        return Ok((tx.clone(), Some(canonical_txid)));
     }
-    Ok((tx.clone(), None))
+    Ok((tx.clone(), Some(canonical_txid)))
 }
 
 fn submit_tx_status_and_detail(code: &str) -> (tiny_http::StatusCode, serde_json::Value) {
@@ -543,6 +547,7 @@ fn submit_tx_status_and_detail(code: &str) -> (tiny_http::StatusCode, serde_json
         | "invalid_tx"
         | "invalid_tx_no_outputs"
         | "invalid_txid"
+        | "txid_mismatch"
         | "missing_sig"
         | "missing_tx"
         | "wrong_pubkey"
@@ -859,11 +864,29 @@ mod tests {
             Err("invalid_txid")
         );
 
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}]
+        });
+        let canonical = super::txid_from_value(&tx).expect("canonical txid");
+
         let parsed = parse_submit_tx_request(&json!({
-            "tx": {"vin":[{"txid":"a","vout":0}],"vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}]},
-            "txid":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "tx": tx,
+            "txid": canonical.to_uppercase()
         }))
         .expect("payload should parse");
         assert!(parsed.1.is_some());
+        assert_eq!(parsed.1.as_deref(), Some(canonical.as_str()));
+
+        assert_eq!(
+            parse_submit_tx_request(&json!({
+                "tx": {
+                    "vin":[{"txid":"a","vout":0}],
+                    "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}]
+                },
+                "txid":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            })),
+            Err("txid_mismatch")
+        );
     }
 }
