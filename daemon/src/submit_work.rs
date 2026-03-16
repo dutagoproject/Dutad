@@ -256,10 +256,65 @@ fn read_mempool_value(data_dir: &str) -> serde_json::Value {
     let path = format!("{}/mempool.json", data_dir.trim_end_matches('/'));
     if let Ok(s) = fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            if let Some(sanitized) = sanitize_mempool_value(&v) {
+                return sanitized;
+            }
             return v;
         }
     }
     json!({"txids": [], "txs": {}})
+}
+
+fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
+    let mut mp = v.clone();
+    let txs_obj = mp.get("txs").and_then(|x| x.as_object())?.clone();
+    let mut changed = false;
+    let mut new_txs = serde_json::Map::new();
+    let mut ordered: Vec<String> = Vec::new();
+
+    if let Some(old_ids) = mp.get("txids").and_then(|x| x.as_array()) {
+        for item in old_ids {
+            let Some(old_key) = item.as_str() else { continue };
+            let Some(txv) = txs_obj.get(old_key) else { continue };
+            let mut tx_for_id = txv.clone();
+            if let Some(obj) = tx_for_id.as_object_mut() {
+                obj.remove("fee");
+                obj.remove("size");
+            }
+            let new_key = crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.to_string());
+            if new_key != old_key {
+                changed = true;
+            }
+            if !new_txs.contains_key(&new_key) {
+                new_txs.insert(new_key.clone(), txv.clone());
+                ordered.push(new_key);
+            }
+        }
+    }
+
+    for (old_key, txv) in txs_obj.iter() {
+        let mut tx_for_id = txv.clone();
+        if let Some(obj) = tx_for_id.as_object_mut() {
+            obj.remove("fee");
+            obj.remove("size");
+        }
+        let new_key = crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.clone());
+        if new_key != *old_key {
+            changed = true;
+        }
+        if !new_txs.contains_key(&new_key) {
+            new_txs.insert(new_key.clone(), txv.clone());
+            ordered.push(new_key);
+        }
+    }
+
+    if changed {
+        mp["txs"] = serde_json::Value::Object(new_txs);
+        mp["txids"] = serde_json::Value::Array(ordered.into_iter().map(serde_json::Value::String).collect());
+        Some(mp)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn accept_mined_block(
