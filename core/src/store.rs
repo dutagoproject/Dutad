@@ -261,7 +261,7 @@ fn expected_bits_for_next_height(
     let last = block_at_from_tree(blocks, next_height - 1)
         .ok_or_else(|| "prev_block_missing".to_string())?;
     let mut bits = last.bits;
-    let launch_guard = pow_launch_guard_enabled(net, next_height, bits);
+    let launch_guard = pow_launch_difficulty_hardening_enabled(net, next_height, bits);
 
     // Special-case window=1: we need two distinct timestamps (prev block and its parent).
     // The generic anchor logic below would pick the same block for first/last and always

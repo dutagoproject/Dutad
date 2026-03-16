@@ -82,17 +82,13 @@ pub const DEVFEE_BPS_STEADY: u64 = 200;
 pub const DEVFEE_BPS: u64 = DEVFEE_BPS_YEAR1;
 pub const DEV_FEE_BPS: u64 = DEVFEE_BPS;
 
-pub const DEVFEE_ADDRS_MAINNET: [&str; 1] = [
-    "dut3ed5b614170366a0d16242504c12c16cd6537925",
-];
+pub const DEVFEE_ADDRS_MAINNET: [&str; 1] = ["dut3ed5b614170366a0d16242504c12c16cd6537925"];
 pub const DEVFEE_ADDRS_TESTNET: [&str; 3] = [
     "test36b504b446742162d52f5d666fc4780c2d4ae740",
     "test46b504b446742162d52f5d666fc4780c2d4ae741",
     "test56b504b446742162d52f5d666fc4780c2d4ae742",
 ];
-pub const DEVFEE_ADDRS_STAGENET: [&str; 1] = [
-    "stg36b504b446742162d52f5d666fc4780c2d4ae740",
-];
+pub const DEVFEE_ADDRS_STAGENET: [&str; 1] = ["stg36b504b446742162d52f5d666fc4780c2d4ae740"];
 
 pub const DEV_FEE_ADDRESS_MAINNET: &str = DEVFEE_ADDRS_MAINNET[0];
 pub const DEV_FEE_ADDRESS_TESTNET: &str = DEVFEE_ADDRS_TESTNET[0];
@@ -200,6 +196,19 @@ pub fn pow_launch_guard_enabled(net: Network, next_height: u64, current_bits: u6
             next_height <= pow_launch_guard_until_height(net)
                 && current_bits < pow_launch_guard_target_bits(net)
         }
+        Network::Testnet | Network::Stagenet => false,
+    }
+}
+
+pub fn pow_launch_difficulty_hardening_enabled(
+    net: Network,
+    next_height: u64,
+    current_bits: u64,
+) -> bool {
+    match net {
+        // Difficulty-side hardening is disabled; bootstrap safety now relies on
+        // backbone-first sync and mining readiness instead of asymmetric retargets.
+        Network::Mainnet => false && pow_launch_guard_enabled(net, next_height, current_bits),
         Network::Testnet | Network::Stagenet => false,
     }
 }
@@ -350,6 +359,11 @@ mod tests {
         assert!(!pow_launch_guard_enabled(Network::Mainnet, 1, 21));
         assert!(!pow_launch_guard_enabled(Network::Testnet, 1, 8));
         assert!(!pow_launch_guard_enabled(Network::Stagenet, 1, 10));
+        assert!(!pow_launch_difficulty_hardening_enabled(
+            Network::Mainnet,
+            1,
+            12
+        ));
     }
 
     #[test]

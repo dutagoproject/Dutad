@@ -1,11 +1,12 @@
-use crate::ChainBlock;
 use crate::canon_json;
+use crate::ChainBlock;
 use duta_core::address;
 use duta_core::dutahash;
 use duta_core::hash;
 use duta_core::netparams::{
-    devfee_addrs, devfee_bps, genesis_hash, pow_launch_guard_enabled, pow_launch_guard_recent_span,
-    pow_max_bits, pow_min_bits, pow_retarget_window, pow_start_bits, pow_target_secs, Network,
+    devfee_addrs, devfee_bps, genesis_hash, pow_launch_difficulty_hardening_enabled,
+    pow_launch_guard_recent_span, pow_max_bits, pow_min_bits, pow_retarget_window, pow_start_bits,
+    pow_target_secs, Network,
 };
 use duta_core::types::H32;
 use serde::{Deserialize, Serialize};
@@ -374,7 +375,7 @@ fn expected_bits_for_next_height(
     let last = block_at_from_tree(blocks, next_height - 1)
         .ok_or_else(|| "prev_block_missing".to_string())?;
     let mut bits = last.bits;
-    let launch_guard = pow_launch_guard_enabled(net, next_height, bits);
+    let launch_guard = pow_launch_difficulty_hardening_enabled(net, next_height, bits);
 
     // Special-case window=1: we need two distinct timestamps (prev block and its parent).
     // The generic anchor logic below would pick the same block for first/last and always
@@ -725,7 +726,10 @@ fn put_block_db(blocks: &sled::Tree, b: &ChainBlock) -> Result<(), String> {
 }
 
 fn parse_txs_from_block(b: &ChainBlock) -> Result<Vec<(String, serde_json::Value)>, String> {
-    let txs_val = b.txs.as_ref().ok_or_else(|| "block_txs_missing".to_string())?;
+    let txs_val = b
+        .txs
+        .as_ref()
+        .ok_or_else(|| "block_txs_missing".to_string())?;
     let txs_obj = txs_val
         .as_object()
         .ok_or_else(|| "block_txs_missing".to_string())?;
@@ -737,10 +741,7 @@ fn parse_txs_from_block(b: &ChainBlock) -> Result<Vec<(String, serde_json::Value
         }
         let computed = txid_from_value(vv)?;
         if computed != *k {
-            return Err(format!(
-                "txid_mismatch key={} computed={}",
-                k, computed
-            ));
+            return Err(format!("txid_mismatch key={} computed={}", k, computed));
         }
         if tx_map.insert(k.clone(), vv.clone()).is_some() {
             return Err(format!("txid_duplicate: {}", k));
@@ -784,7 +785,11 @@ fn parse_txs_from_block(b: &ChainBlock) -> Result<Vec<(String, serde_json::Value
                 .and_then(|x| x.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
-            if vin_len == 0 { 0usize } else { 1usize }
+            if vin_len == 0 {
+                0usize
+            } else {
+                1usize
+            }
         });
         ids
     };
@@ -1220,7 +1225,13 @@ fn rollback_one(
     // set tip to previous block (if any)
     let prev_h = tip_h.saturating_sub(1);
     if prev_h == 0 {
-        set_tip_fields_db(meta, 0, genesis_hash(net).to_string(), 0, pow_start_bits(net))?;
+        set_tip_fields_db(
+            meta,
+            0,
+            genesis_hash(net).to_string(),
+            0,
+            pow_start_bits(net),
+        )?;
     } else if let Some(prev_b) = block_at_from_tree(blocks, prev_h) {
         set_tip_fields_db(
             meta,
@@ -1231,7 +1242,13 @@ fn rollback_one(
         )?;
     } else {
         // should not happen if DB consistent; fall back to canonical genesis identity
-        set_tip_fields_db(meta, 0, genesis_hash(net).to_string(), 0, pow_start_bits(net))?;
+        set_tip_fields_db(
+            meta,
+            0,
+            genesis_hash(net).to_string(),
+            0,
+            pow_start_bits(net),
+        )?;
     }
     Ok(())
 }
@@ -1875,7 +1892,14 @@ mod tests_a5 {
             serde_json::to_vec(&json!({"created":[],"spent":{}})).unwrap(),
         )
         .unwrap();
-        set_tip_fields_db(&meta, 2, block2.hash32.clone(), block2.chainwork, block2.bits).unwrap();
+        set_tip_fields_db(
+            &meta,
+            2,
+            block2.hash32.clone(),
+            block2.chainwork,
+            block2.bits,
+        )
+        .unwrap();
         db.flush().unwrap();
         drop(undo);
         drop(hash_index);
@@ -1925,7 +1949,14 @@ mod tests_a5 {
             serde_json::to_vec(&json!({"created":[],"spent":{}})).unwrap(),
         )
         .unwrap();
-        set_tip_fields_db(&meta, 1, block1.hash32.clone(), block1.chainwork, block1.bits).unwrap();
+        set_tip_fields_db(
+            &meta,
+            1,
+            block1.hash32.clone(),
+            block1.chainwork,
+            block1.bits,
+        )
+        .unwrap();
         db.flush().unwrap();
         drop(undo);
         drop(blocks);
@@ -2254,7 +2285,14 @@ mod tests_a5 {
             serde_json::to_vec(&json!({"created":[],"spent":{}})).unwrap(),
         )
         .unwrap();
-        set_tip_fields_db(&meta, 1, block1.hash32.clone(), block1.chainwork, block1.bits).unwrap();
+        set_tip_fields_db(
+            &meta,
+            1,
+            block1.hash32.clone(),
+            block1.chainwork,
+            block1.bits,
+        )
+        .unwrap();
         db.flush().unwrap();
         drop(undo);
         drop(blocks);
