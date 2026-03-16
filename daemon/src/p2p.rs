@@ -1339,6 +1339,17 @@ fn launch_guard_resync_interval(net: Network, peer: &str) -> Duration {
     }
 }
 
+fn official_tip_sync_from(net: Network, peer: &str, local_h: u64, local_hash32: &str, remote_h: u64, remote_hash32: &str) -> usize {
+    if net == Network::Mainnet
+        && is_launch_backbone_peer_for_net(net, peer)
+        && (remote_h > local_h || (remote_h == local_h && remote_hash32 != local_hash32))
+    {
+        reorg_overlap_from(local_h)
+    } else {
+        (local_h + 1) as usize
+    }
+}
+
 fn outbound_tick_interval() -> Duration {
     if launch_guard_active_now() {
         Duration::from_secs(LAUNCH_GUARD_DIAL_INTERVAL_SECS)
@@ -2134,9 +2145,9 @@ fn handle_peer(
             Msg::Tip { height, hash32, .. } => {
                 note_seen_height(height);
                 note_inbound_peer_tip(&peer, height, &hash32);
-                let (local_h, _hh, _bb, _cw) = tip_fields(&data_dir);
-                if height > local_h {
-                    let from = (local_h + 1) as usize;
+                let (local_h, local_hash32, _bb, _cw) = tip_fields(&data_dir);
+                if height > local_h || (height == local_h && hash32 != local_hash32) {
+                    let from = official_tip_sync_from(network, &peer, local_h, &local_hash32, height, &hash32);
                     let _ = send_msg(
                         &mut stream,
                         &Msg::GetBlocksFrom {
@@ -2645,9 +2656,16 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                 Some(&hash32),
                                 None,
                             );
-                            let (local_h, _hh, _bb, _cw) = tip_fields(data_dir);
-                            if height > local_h {
-                                let from = (local_h + 1) as usize;
+                            let (local_h, local_hash32, _bb, _cw) = tip_fields(data_dir);
+                            if height > local_h || (height == local_h && hash32 != local_hash32) {
+                                let from = official_tip_sync_from(
+                                    network,
+                                    addr,
+                                    local_h,
+                                    &local_hash32,
+                                    height,
+                                    &hash32,
+                                );
                                 let _ = send_msg(
                                     &mut stream,
                                     &Msg::GetBlocksFrom {
@@ -3081,7 +3099,7 @@ mod tests {
     use super::{
         ban_peer_manual, canonicalize_peer_token, is_transient_dial_error, list_banned_json,
         launch_guard_local_submit_ready, launch_guard_mining_ready, normalize_bootstrap_candidates, parse_peers_text,
-        read_line_limited, reorg_overlap_from, should_accept_reorg_candidate, subnet24_key,
+        official_tip_sync_from, read_line_limited, reorg_overlap_from, should_accept_reorg_candidate, subnet24_key,
         should_prefer_backbone_tie_candidate, unban_peer_manual, validate_block_basic,
         MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
@@ -3500,6 +3518,22 @@ mod tests {
         );
         let ready = launch_guard_mining_ready(Network::Mainnet, 1, &"11".repeat(32), 12);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
+    }
+
+    #[test]
+    fn official_tip_sync_uses_overlap_for_official_ahead_or_conflicting_tip() {
+        assert_eq!(
+            official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 21, &"aa".repeat(32), 22, &"bb".repeat(32)),
+            reorg_overlap_from(21)
+        );
+        assert_eq!(
+            official_tip_sync_from(Network::Mainnet, "seed1.dutago.xyz:19082", 21, &"aa".repeat(32), 21, &"bb".repeat(32)),
+            reorg_overlap_from(21)
+        );
+        assert_eq!(
+            official_tip_sync_from(Network::Mainnet, "198.51.100.10:19082", 21, &"aa".repeat(32), 22, &"bb".repeat(32)),
+            22usize
+        );
     }
 
     #[test]
