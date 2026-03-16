@@ -2921,6 +2921,34 @@ mod tests {
     }
 
     #[test]
+    fn launch_guard_allows_mining_during_hard_window_when_backbone_is_healthy() {
+        let _guard = launch_guard_test_lock().lock().unwrap();
+        clear_test_peer_state();
+
+        let now = std::time::Instant::now();
+        super::BEST_SEEN_HEIGHT.store(50, Ordering::Relaxed);
+        if let Ok(mut peers) = super::state().outbound_recent.lock() {
+            for addr in ["seed1.dutago.xyz:19082", "seed2.dutago.xyz:19082"] {
+                peers.insert(
+                    addr.to_string(),
+                    super::PeerSnapshot {
+                        addr: addr.to_string(),
+                        inbound: false,
+                        connected_at: now,
+                        last_seen_at: now,
+                        last_tip_height: 50,
+                        last_error: None,
+                        success_count: 1,
+                        failure_count: 0,
+                    },
+                );
+            }
+        }
+
+        assert_eq!(launch_guard_mining_ready(Network::Mainnet, 50), Ok(()));
+    }
+
+    #[test]
     fn transient_dial_error_classification_matches_expected_strings() {
         assert!(is_transient_dial_error("Resource temporarily unavailable (os error 11)"));
         assert!(is_transient_dial_error("operation would block"));
