@@ -297,8 +297,7 @@ fn network_health_priority_active() -> bool {
         return false;
     }
     let (tip_height, tip_hash32, _tip_bits, _tip_cw) = tip_fields(&cfg.data_dir);
-    tip_height <= HEALTH_SYNC_PRIORITY_HEIGHT
-        || launch_guard_unhealthy(net, tip_height, &tip_hash32)
+    tip_height <= HEALTH_SYNC_PRIORITY_HEIGHT || launch_guard_unhealthy(net, tip_height, &tip_hash32)
 }
 
 fn is_launch_backbone_peer_for_net(net: Network, addr: &str) -> bool {
@@ -1537,6 +1536,31 @@ fn official_tip_sync_from(
     }
 }
 
+fn official_sync_request_from(
+    net: Network,
+    peer: &str,
+    local_h: u64,
+    local_hash32: &str,
+    remote_h: u64,
+    remote_hash32: &str,
+) -> Option<usize> {
+    if net == Network::Mainnet
+        && is_launch_backbone_peer_for_net(net, peer)
+        && (remote_h > local_h || (remote_h == local_h && remote_hash32 != local_hash32))
+    {
+        Some(official_tip_sync_from(
+            net,
+            peer,
+            local_h,
+            local_hash32,
+            remote_h,
+            remote_hash32,
+        ))
+    } else {
+        None
+    }
+}
+
 fn health_priority_sync_from(local_h: u64) -> usize {
     let overlap_from = reorg_overlap_from(local_h);
     let earliest_full_window = local_h
@@ -2283,6 +2307,7 @@ fn handle_peer(
     let mut win_start = Instant::now();
     let mut win_count: u32 = 0;
     let mut win_bytes: usize = 0;
+    let mut peer_tip_view: Option<(u64, String)> = None;
 
     let mut raw = Vec::<u8>::new();
     loop {
@@ -2422,16 +2447,16 @@ fn handle_peer(
             Msg::Tip { height, hash32, .. } => {
                 note_seen_height(height);
                 note_inbound_peer_tip(&peer, height, &hash32);
+                peer_tip_view = Some((height, hash32.clone()));
                 let (local_h, local_hash32, _bb, _cw) = tip_fields(&data_dir);
-                if height > local_h || (height == local_h && hash32 != local_hash32) {
-                    let from = official_tip_sync_from(
-                        network,
-                        &peer,
-                        local_h,
-                        &local_hash32,
-                        height,
-                        &hash32,
-                    );
+                if let Some(from) = official_sync_request_from(
+                    network,
+                    &peer,
+                    local_h,
+                    &local_hash32,
+                    height,
+                    &hash32,
+                ) {
                     let _ = send_msg(
                         &mut stream,
                         &Msg::GetBlocksFrom {
@@ -2727,6 +2752,23 @@ fn handle_peer(
                                         from,
                                         limit
                                     );
+                                } else if let Some((remote_h, remote_hash32)) = peer_tip_view.as_ref() {
+                                    let (new_h, new_hash32, _new_bits, _new_cw) = tip_fields(&data_dir);
+                                    if let Some(from) = official_sync_request_from(
+                                        network,
+                                        &peer,
+                                        new_h,
+                                        &new_hash32,
+                                        *remote_h,
+                                        remote_hash32,
+                                    ) {
+                                        let limit = MAX_BLOCKS_PER_MSG;
+                                        let _ = send_msg(
+                                            &mut stream,
+                                            &Msg::GetBlocksFrom { from, limit },
+                                        );
+                                        note_peer_resync(&peer, false, true);
+                                    }
                                 }
                             }
                         }
@@ -2976,6 +3018,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
         .map_err(|e| format!("stream_clone_failed:{e}"))?;
     let mut reader = BufReader::new(reader_stream);
     let mut raw = Vec::<u8>::new();
+    let mut peer_tip_view: Option<(u64, String)> = None;
     for _ in 0..16 {
         match read_line_limited(&mut reader, &mut raw) {
             Ok(0) => break,
@@ -2989,6 +3032,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                     match msg {
                         Msg::Tip { height, hash32, .. } => {
                             note_seen_height(height);
+                            peer_tip_view = Some((height, hash32.clone()));
                             note_outbound_peer_result(
                                 addr,
                                 true,
@@ -2997,15 +3041,14 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                 None,
                             );
                             let (local_h, local_hash32, _bb, _cw) = tip_fields(data_dir);
-                            if height > local_h || (height == local_h && hash32 != local_hash32) {
-                                let from = official_tip_sync_from(
-                                    network,
-                                    addr,
-                                    local_h,
-                                    &local_hash32,
-                                    height,
-                                    &hash32,
-                                );
+                            if let Some(from) = official_sync_request_from(
+                                network,
+                                addr,
+                                local_h,
+                                &local_hash32,
+                                height,
+                                &hash32,
+                            ) {
                                 let _ = send_msg(
                                     &mut stream,
                                     &Msg::GetBlocksFrom {
@@ -3050,6 +3093,26 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                             limit: MAX_BLOCKS_PER_MSG,
                                         },
                                     );
+                                } else if let Some((remote_h, remote_hash32)) = peer_tip_view.as_ref() {
+                                    let (new_h, new_hash32, _new_bits, _new_cw) =
+                                        tip_fields(data_dir);
+                                    if let Some(from) = official_sync_request_from(
+                                        network,
+                                        addr,
+                                        new_h,
+                                        &new_hash32,
+                                        *remote_h,
+                                        remote_hash32,
+                                    ) {
+                                        let _ = send_msg(
+                                            &mut stream,
+                                            &Msg::GetBlocksFrom {
+                                                from,
+                                                limit: MAX_BLOCKS_PER_MSG,
+                                            },
+                                        );
+                                        note_peer_resync(addr, false, true);
+                                    }
                                 }
                                 continue;
                             }
@@ -3144,6 +3207,28 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                                                 limit: MAX_BLOCKS_PER_MSG,
                                                             },
                                                         );
+                                                    } else if let Some((remote_h, remote_hash32)) =
+                                                        peer_tip_view.as_ref()
+                                                    {
+                                                        let (new_h, new_hash32, _new_bits, _new_cw) =
+                                                            tip_fields(data_dir);
+                                                        if let Some(from) = official_sync_request_from(
+                                                            network,
+                                                            addr,
+                                                            new_h,
+                                                            &new_hash32,
+                                                            *remote_h,
+                                                            remote_hash32,
+                                                        ) {
+                                                            let _ = send_msg(
+                                                                &mut stream,
+                                                                &Msg::GetBlocksFrom {
+                                                                    from,
+                                                                    limit: MAX_BLOCKS_PER_MSG,
+                                                                },
+                                                            );
+                                                            note_peer_resync(addr, false, true);
+                                                        }
                                                     }
                                                 }
                                             }
