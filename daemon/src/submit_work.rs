@@ -113,8 +113,8 @@ fn extract_u64_field(s: &str, key: &str) -> Option<u64> {
 fn canonical_submit_reason(detail: &str) -> &'static str {
     if detail.contains("stale_work") || detail.contains("stale_or_out_of_order_block") {
         "stale"
-    } else if detail.contains("launch_guard") {
-        "launch_guard"
+    } else if detail.contains("sync_gate") {
+        "sync_gate"
     } else if detail.contains("pow_invalid") {
         "low_difficulty"
     } else if detail.contains("bad_prevhash")
@@ -135,7 +135,7 @@ fn submit_http_status(reason: &str) -> u16 {
     match reason {
         "stale" => 410,
         "low_difficulty" => 422,
-        "syncing" | "busy" | "launch_guard" => 503,
+        "syncing" | "busy" | "sync_gate" => 503,
         _ => 400,
     }
 }
@@ -149,8 +149,8 @@ fn submit_reason_message(reason: &str) -> String {
         "work_mismatch" => {
             "Share rejected: work mismatch (chain tip changed). Please fetch new work.".to_string()
         }
-        "launch_guard" => {
-            "Share rejected: node is waiting for official chain sync. Please retry after the node is aligned."
+        "sync_gate" => {
+            "Share rejected: node is waiting for backbone sync. Please retry after the node is aligned."
                 .to_string()
         }
         "syncing" => {
@@ -164,8 +164,8 @@ fn submit_reason_message(reason: &str) -> String {
 
 fn submit_reject_body(detail: &str) -> (u16, String) {
     let reason = canonical_submit_reason(detail);
-    let user_detail = if reason == "launch_guard" {
-        crate::p2p::launch_guard_user_detail(detail).to_string()
+    let user_detail = if reason == "sync_gate" {
+        crate::p2p::sync_gate_user_detail(detail).to_string()
     } else {
         detail.to_string()
     };
@@ -354,17 +354,9 @@ pub(crate) fn accept_mined_block(
 pub(crate) fn accept_mined_block_with_source(
     data_dir: &str,
     mined_block: &ChainBlock,
-    official_stratum_source: bool,
+    _official_stratum_source: bool,
 ) -> Result<serde_json::Value, String> {
-    let net = net_from_datadir(data_dir);
-    if !official_stratum_source {
-        p2p::launch_guard_local_submit_ready(
-            net,
-            mined_block.height,
-            &mined_block.hash32,
-            mined_block.bits,
-        )?;
-    }
+    let _net = net_from_datadir(data_dir);
     store::note_accepted_block(data_dir, mined_block)?;
     p2p::note_local_tip_height(mined_block.height);
 
@@ -697,9 +689,9 @@ mod tests {
         assert_eq!(canonical_submit_reason("stale_work"), "stale");
         assert_eq!(
             canonical_submit_reason(
-                "launch_guard_official_height_mismatch tip_height=50 official_min_height=49"
+                "sync_gate_official_height_mismatch tip_height=50 official_min_height=49"
             ),
-            "launch_guard"
+            "sync_gate"
         );
         assert_eq!(canonical_submit_reason("pow_invalid"), "low_difficulty");
         assert_eq!(canonical_submit_reason("bad_prevhash"), "work_mismatch");
@@ -708,7 +700,7 @@ mod tests {
         assert_eq!(submit_http_status("stale"), 410);
         assert_eq!(submit_http_status("low_difficulty"), 422);
         assert_eq!(submit_http_status("syncing"), 503);
-        assert_eq!(submit_http_status("launch_guard"), 503);
+        assert_eq!(submit_http_status("sync_gate"), 503);
     }
 
     #[test]
@@ -757,3 +749,4 @@ mod tests {
         assert!(crate::work::peek_work(work_id).is_some());
     }
 }
+

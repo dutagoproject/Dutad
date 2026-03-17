@@ -21,6 +21,7 @@ enum Msg {
     Hello {
         net: String,
         version: String,
+        genesis_hash: String,
     },
     GetTip {},
     Tip {
@@ -93,6 +94,11 @@ static DIAL_FAIL_LOG_STATE: OnceLock<Mutex<HashMap<String, (Instant, u64, String
 
 static LOG_THROTTLE_STATE: OnceLock<Mutex<HashMap<String, (Instant, u64)>>> = OnceLock::new();
 
+fn hello_genesis_hash(net: &str) -> String {
+    let network = Network::parse_name(net).unwrap_or(Network::Mainnet);
+    netparams::genesis_hash(network).to_string()
+}
+
 fn log_throttle_state() -> &'static Mutex<HashMap<String, (Instant, u64)>> {
     LOG_THROTTLE_STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -164,7 +170,7 @@ fn bootstrap_has_healthy_peer() -> bool {
     false
 }
 
-fn launch_guard_backbone_targets(net: Network) -> Vec<String> {
+fn sync_gate_backbone_targets(net: Network) -> Vec<String> {
     let port = net.default_p2p_port().to_string();
     let mut out: Vec<String> = net
         .default_seed_hosts()
@@ -182,26 +188,26 @@ fn launch_guard_backbone_targets(net: Network) -> Vec<String> {
     out
 }
 
-const LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS: u64 = 30;
-const LAUNCH_GUARD_RESYNC_INTERVAL_MS: u64 = 500;
-const LAUNCH_GUARD_DIAL_INTERVAL_SECS: u64 = 1;
+const BACKBONE_FRESHNESS_SECS: u64 = 30;
+const BACKBONE_RESYNC_INTERVAL_MS: u64 = 500;
+const BACKBONE_DIAL_INTERVAL_SECS: u64 = 1;
 const HEALTH_SYNC_PRIORITY_HEIGHT: u64 = 16;
 
-pub fn launch_guard_user_detail(detail: &str) -> &'static str {
-    if detail.starts_with("launch_guard_syncing") {
+pub fn sync_gate_user_detail(detail: &str) -> &'static str {
+    if detail.starts_with("sync_gate_syncing") {
         "waiting_for_chain_sync"
     } else {
-        "waiting_for_official_chain_sync"
+        "waiting_for_backbone_sync"
     }
 }
 
-fn launch_guard_backbone_views(net: Network) -> Vec<(u64, String)> {
-    let expected: HashSet<String> = launch_guard_backbone_targets(net).into_iter().collect();
+fn sync_gate_backbone_views(net: Network) -> Vec<(u64, String)> {
+    let expected: HashSet<String> = sync_gate_backbone_targets(net).into_iter().collect();
     if expected.is_empty() {
         return Vec::new();
     }
     let now = Instant::now();
-    let freshness = Duration::from_secs(LAUNCH_GUARD_BACKBONE_FRESHNESS_SECS);
+    let freshness = Duration::from_secs(BACKBONE_FRESHNESS_SECS);
     let mut merged: HashMap<String, (Instant, u64, String)> = HashMap::new();
 
     let collect_peer =
@@ -263,14 +269,14 @@ fn launch_guard_backbone_views(net: Network) -> Vec<(u64, String)> {
         .collect()
 }
 
-fn launch_guard_unhealthy(net: Network, tip_height: u64, tip_hash32: &str) -> bool {
+fn sync_gate_unhealthy(net: Network, tip_height: u64, tip_hash32: &str) -> bool {
     let best_h = best_seen_height();
     if best_h > tip_height.saturating_add(1) {
         return true;
     }
-    let backbone_views = launch_guard_backbone_views(net);
+    let backbone_views = sync_gate_backbone_views(net);
     let backbone_peers = backbone_views.len();
-    if backbone_peers < launch_guard_min_backbone_peers(net) {
+    if backbone_peers < sync_gate_min_backbone_peers(net) {
         return true;
     }
     backbone_views
@@ -278,14 +284,14 @@ fn launch_guard_unhealthy(net: Network, tip_height: u64, tip_hash32: &str) -> bo
         .any(|(height, hash32)| *height != tip_height || hash32 != tip_hash32)
 }
 
-fn launch_guard_active_now() -> bool {
+fn sync_gate_active_now() -> bool {
     let Some(cfg) = cfg() else {
         return false;
     };
     let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
     let (tip_height, tip_hash32, tip_bits, _) = tip_fields(&cfg.data_dir);
-    netparams::pow_launch_guard_enabled(net, tip_height.saturating_add(1), tip_bits)
-        || launch_guard_unhealthy(net, tip_height, &tip_hash32)
+    netparams::pow_bootstrap_sync_enabled(net, tip_height.saturating_add(1), tip_bits)
+        || sync_gate_unhealthy(net, tip_height, &tip_hash32)
 }
 
 fn network_health_priority_active() -> bool {
@@ -297,40 +303,40 @@ fn network_health_priority_active() -> bool {
         return false;
     }
     let (tip_height, tip_hash32, _tip_bits, _tip_cw) = tip_fields(&cfg.data_dir);
-    tip_height <= HEALTH_SYNC_PRIORITY_HEIGHT || launch_guard_unhealthy(net, tip_height, &tip_hash32)
+    tip_height <= HEALTH_SYNC_PRIORITY_HEIGHT || sync_gate_unhealthy(net, tip_height, &tip_hash32)
 }
 
 fn is_launch_backbone_peer_for_net(net: Network, addr: &str) -> bool {
     let addr = addr.trim().to_ascii_lowercase();
-    launch_guard_backbone_targets(net)
+    sync_gate_backbone_targets(net)
         .into_iter()
         .any(|candidate| candidate == addr)
 }
 
-fn launch_guard_backbone_peer_count(net: Network) -> usize {
-    launch_guard_backbone_views(net).len()
+fn sync_gate_backbone_peer_count(net: Network) -> usize {
+    sync_gate_backbone_views(net).len()
 }
 
-fn launch_guard_min_backbone_peers(net: Network) -> usize {
+fn sync_gate_min_backbone_peers(net: Network) -> usize {
     match net {
         Network::Mainnet => 2,
         Network::Testnet | Network::Stagenet => 0,
     }
 }
 
-fn launch_guard_backbone_heights(net: Network) -> Vec<u64> {
-    launch_guard_backbone_views(net)
+fn sync_gate_backbone_heights(net: Network) -> Vec<u64> {
+    sync_gate_backbone_views(net)
         .into_iter()
         .map(|(height, _)| height)
         .collect()
 }
 
-fn launch_guard_backbone_summary(
+fn sync_gate_backbone_summary(
     net: Network,
     tip_height: u64,
     tip_hash32: &str,
 ) -> (usize, usize, usize, Option<u64>, Option<u64>) {
-    let views = launch_guard_backbone_views(net);
+    let views = sync_gate_backbone_views(net);
     let exact_matches = views
         .iter()
         .filter(|(height, hash32)| *height == tip_height && hash32 == tip_hash32)
@@ -354,7 +360,7 @@ fn launch_guard_backbone_summary(
     )
 }
 
-pub fn launch_guard_mining_ready(
+pub fn sync_gate_mining_ready(
     net: Network,
     tip_height: u64,
     tip_hash32: &str,
@@ -363,13 +369,13 @@ pub fn launch_guard_mining_ready(
     if net != Network::Mainnet {
         return Ok(());
     }
-    let hard_guard =
-        netparams::pow_launch_guard_enabled(net, tip_height.saturating_add(1), current_bits);
+    let hard_sync_window =
+        netparams::pow_bootstrap_sync_enabled(net, tip_height.saturating_add(1), current_bits);
     let best_h = best_seen_height();
     let syncing = best_h > tip_height.saturating_add(1);
-    let backbone_views = launch_guard_backbone_views(net);
+    let backbone_views = sync_gate_backbone_views(net);
     let backbone_peers = backbone_views.len();
-    let min_backbone_peers = launch_guard_min_backbone_peers(net);
+    let min_backbone_peers = sync_gate_min_backbone_peers(net);
     let insufficient_backbone = backbone_peers < min_backbone_peers;
     let backbone_heights: Vec<u64> = backbone_views.iter().map(|(height, _)| *height).collect();
     let backbone_hash_mismatches = backbone_views
@@ -393,7 +399,7 @@ pub fn launch_guard_mining_ready(
     let far_lagging_backbone = backbone_views
         .iter()
         .any(|(height, _)| height.saturating_add(1) < tip_height);
-    let backbone_has_nearby_consensus = if hard_guard && tip_height > 1 {
+    let backbone_has_nearby_consensus = if hard_sync_window && tip_height > 1 {
         matching_backbone_peers > 0
     } else {
         matching_backbone_peers > 0 || one_behind_backbone_peers == backbone_peers
@@ -403,18 +409,18 @@ pub fn launch_guard_mining_ready(
         || far_lagging_backbone
         || !backbone_has_nearby_consensus;
 
-    if !(hard_guard || syncing || insufficient_backbone || backbone_mismatch) {
+    if !(hard_sync_window || syncing || insufficient_backbone || backbone_mismatch) {
         return Ok(());
     }
     if syncing {
         return Err(format!(
-            "launch_guard_syncing tip_height={} best_seen_height={}",
+            "sync_gate_syncing tip_height={} best_seen_height={}",
             tip_height, best_h
         ));
     }
     if insufficient_backbone {
         return Err(format!(
-            "launch_guard_official_peer_insufficient tip_height={} best_seen_height={} official_backbone_peers={} required_backbone_peers={}",
+            "sync_gate_official_peer_insufficient tip_height={} best_seen_height={} official_backbone_peers={} required_backbone_peers={}",
             tip_height, best_h, backbone_peers, min_backbone_peers
         ));
     }
@@ -422,14 +428,15 @@ pub fn launch_guard_mining_ready(
         let min_height = backbone_heights.iter().copied().min().unwrap_or(0);
         let max_height = backbone_heights.iter().copied().max().unwrap_or(0);
         return Err(format!(
-            "launch_guard_official_tip_mismatch tip_height={} official_min_height={} official_max_height={} official_backbone_peers={} official_hash_mismatches={} official_tip_matches={} official_one_behind_matches={}",
+            "sync_gate_official_tip_mismatch tip_height={} official_min_height={} official_max_height={} official_backbone_peers={} official_hash_mismatches={} official_tip_matches={} official_one_behind_matches={}",
             tip_height, min_height, max_height, backbone_peers, backbone_hash_mismatches, matching_backbone_peers, one_behind_backbone_peers
         ));
     }
     Ok(())
 }
 
-pub fn launch_guard_local_submit_ready(
+#[allow(dead_code)]
+pub fn sync_gate_local_submit_ready(
     net: Network,
     block_height: u64,
     block_hash32: &str,
@@ -438,12 +445,12 @@ pub fn launch_guard_local_submit_ready(
     if net != Network::Mainnet {
         return Ok(());
     }
-    let backbone_views = launch_guard_backbone_views(net);
+    let backbone_views = sync_gate_backbone_views(net);
     let backbone_peers = backbone_views.len();
-    let min_backbone_peers = launch_guard_min_backbone_peers(net);
+    let min_backbone_peers = sync_gate_min_backbone_peers(net);
     if backbone_peers < min_backbone_peers {
         return Err(format!(
-            "launch_guard_official_peer_insufficient block_height={} official_backbone_peers={} required_backbone_peers={}",
+            "sync_gate_official_peer_insufficient block_height={} official_backbone_peers={} required_backbone_peers={}",
             block_height, backbone_peers, min_backbone_peers
         ));
     }
@@ -457,7 +464,7 @@ pub fn launch_guard_local_submit_ready(
             .max()
             .unwrap_or(0);
         return Err(format!(
-            "launch_guard_official_ahead block_height={} official_max_height={} official_backbone_peers={}",
+            "sync_gate_official_ahead block_height={} official_max_height={} official_backbone_peers={}",
             block_height, max_height, backbone_peers
         ));
     }
@@ -466,7 +473,7 @@ pub fn launch_guard_local_submit_ready(
         .any(|(height, hash32)| *height == block_height && hash32 != block_hash32);
     if competing_same_height {
         return Err(format!(
-            "launch_guard_competing_official_tip block_height={} official_backbone_peers={}",
+            "sync_gate_competing_official_tip block_height={} official_backbone_peers={}",
             block_height, backbone_peers
         ));
     }
@@ -652,9 +659,9 @@ pub fn p2p_public_info() -> serde_json::Value {
         cfg()
             .map(|c| tip_fields(&c.data_dir))
             .unwrap_or((0, "0".repeat(64), 0, 0));
-    let launch_backbone_peers = launch_guard_backbone_peer_count(launch_cfg) as u64;
-    let launch_backbone_heights = launch_guard_backbone_heights(launch_cfg);
-    let launch_backbone_hashes: Vec<String> = launch_guard_backbone_views(launch_cfg)
+    let launch_backbone_peers = sync_gate_backbone_peer_count(launch_cfg) as u64;
+    let launch_backbone_heights = sync_gate_backbone_heights(launch_cfg);
+    let launch_backbone_hashes: Vec<String> = sync_gate_backbone_views(launch_cfg)
         .into_iter()
         .map(|(_, hash32)| hash32)
         .collect();
@@ -664,14 +671,14 @@ pub fn p2p_public_info() -> serde_json::Value {
         launch_backbone_mismatches,
         launch_backbone_min_height,
         launch_backbone_max_height,
-    ) = launch_guard_backbone_summary(launch_cfg, tip_h, &tip_hash32);
-    let launch_required_backbone_peers = launch_guard_min_backbone_peers(launch_cfg) as u64;
-    let launch_guard_hard_active =
-        netparams::pow_launch_guard_enabled(launch_cfg, tip_h.saturating_add(1), tip_bits);
-    let launch_guard_unhealthy_now = launch_guard_unhealthy(launch_cfg, tip_h, &tip_hash32);
-    let launch_guard_active = launch_guard_hard_active || launch_guard_unhealthy_now;
-    let launch_guard_detail =
-        launch_guard_mining_ready(launch_cfg, tip_h, &tip_hash32, tip_bits).err();
+    ) = sync_gate_backbone_summary(launch_cfg, tip_h, &tip_hash32);
+    let launch_required_backbone_peers = sync_gate_min_backbone_peers(launch_cfg) as u64;
+    let sync_gate_hard_active =
+        netparams::pow_bootstrap_sync_enabled(launch_cfg, tip_h.saturating_add(1), tip_bits);
+    let sync_gate_unhealthy_now = sync_gate_unhealthy(launch_cfg, tip_h, &tip_hash32);
+    let sync_gate_active = sync_gate_hard_active || sync_gate_unhealthy_now;
+    let sync_gate_detail =
+        sync_gate_mining_ready(launch_cfg, tip_h, &tip_hash32, tip_bits).err();
     let network_health_priority = network_health_priority_active();
     let backbone_tip_lag = launch_backbone_max_height
         .unwrap_or(0)
@@ -773,20 +780,20 @@ pub fn p2p_public_info() -> serde_json::Value {
     json!({
         "connections": connections,
         "best_seen_height": best_h,
-        "launch_guard_active": launch_guard_active,
-        "launch_guard_hard_active": launch_guard_hard_active,
-        "launch_guard_unhealthy": launch_guard_unhealthy_now,
-        "launch_guard_tip_height": tip_h,
-        "launch_guard_required_backbone_peers": launch_required_backbone_peers,
-        "launch_guard_backbone_peers": launch_backbone_peers,
-        "launch_guard_backbone_heights": launch_backbone_heights,
-        "launch_guard_backbone_hashes": launch_backbone_hashes,
-        "launch_guard_backbone_exact_matches": launch_backbone_exact_matches as u64,
-        "launch_guard_backbone_one_behind": launch_backbone_one_behind as u64,
-        "launch_guard_backbone_mismatches": launch_backbone_mismatches as u64,
-        "launch_guard_backbone_min_height": launch_backbone_min_height,
-        "launch_guard_backbone_max_height": launch_backbone_max_height,
-        "launch_guard_detail": launch_guard_detail,
+        "sync_gate_active": sync_gate_active,
+        "sync_gate_hard_active": sync_gate_hard_active,
+        "sync_gate_unhealthy": sync_gate_unhealthy_now,
+        "sync_gate_tip_height": tip_h,
+        "sync_gate_required_backbone_peers": launch_required_backbone_peers,
+        "sync_gate_backbone_peers": launch_backbone_peers,
+        "sync_gate_backbone_heights": launch_backbone_heights,
+        "sync_gate_backbone_hashes": launch_backbone_hashes,
+        "sync_gate_backbone_exact_matches": launch_backbone_exact_matches as u64,
+        "sync_gate_backbone_one_behind": launch_backbone_one_behind as u64,
+        "sync_gate_backbone_mismatches": launch_backbone_mismatches as u64,
+        "sync_gate_backbone_min_height": launch_backbone_min_height,
+        "sync_gate_backbone_max_height": launch_backbone_max_height,
+        "sync_gate_detail": sync_gate_detail,
         "bootstrap_counters": bootstrap_counters,
         "ban_count": ban_count,
         "bans": bans,
@@ -1453,7 +1460,7 @@ fn outbound_peer_skip_reason(peer: &PeerSnapshot) -> Option<&'static str> {
 fn outbound_peer_should_skip(addr: &str) -> Option<String> {
     if let Some(cfg) = cfg() {
         let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
-        if launch_guard_active_now() && is_launch_backbone_peer_for_net(net, addr) {
+        if sync_gate_active_now() && is_launch_backbone_peer_for_net(net, addr) {
             return None;
         }
     }
@@ -1504,11 +1511,11 @@ fn outbound_peer_quality(addr: &str) -> i64 {
         + recency_bonus
 }
 
-fn launch_guard_resync_interval(net: Network, peer: &str) -> Duration {
+fn sync_gate_resync_interval(net: Network, peer: &str) -> Duration {
     if net == Network::Mainnet
         && (network_health_priority_active() || is_launch_backbone_peer_for_net(net, peer))
     {
-        Duration::from_millis(LAUNCH_GUARD_RESYNC_INTERVAL_MS)
+        Duration::from_millis(BACKBONE_RESYNC_INTERVAL_MS)
     } else {
         Duration::from_secs(2)
     }
@@ -1572,8 +1579,8 @@ fn health_priority_sync_from(local_h: u64) -> usize {
 fn outbound_tick_interval() -> Duration {
     if network_health_priority_active() {
         Duration::from_millis(500)
-    } else if launch_guard_active_now() {
-        Duration::from_secs(LAUNCH_GUARD_DIAL_INTERVAL_SECS)
+    } else if sync_gate_active_now() {
+        Duration::from_secs(BACKBONE_DIAL_INTERVAL_SECS)
     } else {
         Duration::from_secs(2)
     }
@@ -1667,9 +1674,9 @@ fn select_block_broadcast_targets(peers: &[String], port: &str, local_ip: &str) 
 }
 
 fn outbound_quarantined_peers_json() -> Vec<serde_json::Value> {
-    let guarded_net = cfg()
+    let bootstrap_net = cfg()
         .and_then(|cfg| Network::parse_name(&cfg.net))
-        .filter(|_| launch_guard_active_now());
+        .filter(|_| sync_gate_active_now());
     let peers = match state().outbound_recent.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -1677,7 +1684,7 @@ fn outbound_quarantined_peers_json() -> Vec<serde_json::Value> {
     let mut out: Vec<(PeerSnapshot, &'static str)> = peers
         .values()
         .filter(|peer| {
-            guarded_net
+    bootstrap_net
                 .map(|net| !is_launch_backbone_peer_for_net(net, &peer.addr))
                 .unwrap_or(true)
         })
@@ -1993,7 +2000,7 @@ fn should_accept_reorg_candidate(current_tip_cw: u64, incoming_cw: u64) -> bool 
 }
 
 fn backbone_exact_match_count(net: Network, height: u64, hash32: &str) -> usize {
-    launch_guard_backbone_views(net)
+    sync_gate_backbone_views(net)
         .into_iter()
         .filter(|(backbone_height, backbone_hash32)| {
             *backbone_height == height && backbone_hash32 == hash32
@@ -2021,8 +2028,8 @@ fn should_prefer_backbone_tie_candidate(
         return false;
     }
     let launch_relevant =
-        netparams::pow_launch_guard_enabled(net, candidate_height.saturating_add(1), 0)
-            || launch_guard_unhealthy(net, candidate_height, candidate_hash32);
+        netparams::pow_bootstrap_sync_enabled(net, candidate_height.saturating_add(1), 0)
+            || sync_gate_unhealthy(net, candidate_height, candidate_hash32);
     if !launch_relevant {
         return false;
     }
@@ -2223,15 +2230,15 @@ fn penalize_bad_blocks(peer: &str, peer_ip: IpAddr, err: &str, net: &str, data_d
     // stale/out-of-order blocks after we have already requested a resync.
     // Treat those as recovery noise, not hostile misbehavior, or clustered
     // launch nodes will end up temp-banning each other under burst mining.
-    let guarded_seed_recovery = err.contains("stale_or_out_of_order_block")
+    let bootstrap_seed_recovery = err.contains("stale_or_out_of_order_block")
         && Network::parse_name(net)
             .map(|network| {
                 let (tip_height, _, tip_bits, _) = tip_fields(data_dir);
-                netparams::pow_launch_guard_enabled(network, tip_height.saturating_add(1), tip_bits)
+                netparams::pow_bootstrap_sync_enabled(network, tip_height.saturating_add(1), tip_bits)
                     && is_launch_backbone_peer_for_net(network, peer)
             })
             .unwrap_or(false);
-    if (ip_is_loopback_or_private(peer_ip) || guarded_seed_recovery)
+    if (ip_is_loopback_or_private(peer_ip) || bootstrap_seed_recovery)
         && err.contains("stale_or_out_of_order_block")
     {
         dlog!(
@@ -2277,6 +2284,7 @@ fn handle_peer(
         &Msg::Hello {
             net: net.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            genesis_hash: hello_genesis_hash(&net),
         },
     );
 
@@ -2413,11 +2421,13 @@ fn handle_peer(
         };
 
         match msg {
-            Msg::Hello { net: peer_net, .. } => {
+            Msg::Hello {
+                net: peer_net,
+                genesis_hash: peer_genesis_hash,
+                ..
+            } => {
                 if peer_net != net {
-                    score = score.saturating_add(100);
                     note_inbound_peer_error(&peer, "wrong_network");
-                    let _ = score;
                     let _ = send_msg(
                         &mut stream,
                         &Msg::Error {
@@ -2426,6 +2436,22 @@ fn handle_peer(
                         },
                     );
                     ban_ip(peer_ip, "wrong_network");
+                    break;
+                }
+                let expected_genesis_hash = hello_genesis_hash(&net);
+                if !peer_genesis_hash.eq_ignore_ascii_case(&expected_genesis_hash) {
+                    note_inbound_peer_error(&peer, "wrong_genesis");
+                    let _ = send_msg(
+                        &mut stream,
+                        &Msg::Error {
+                            error: "wrong_genesis".to_string(),
+                            detail: format!(
+                                "peer_genesis_hash={} local_genesis_hash={}",
+                                peer_genesis_hash, expected_genesis_hash
+                            ),
+                        },
+                    );
+                    ban_ip(peer_ip, "wrong_genesis");
                     break;
                 }
 
@@ -2530,7 +2556,7 @@ fn handle_peer(
                                 // Window doesn't include anything after the common ancestor.
                                 if should_resync(
                                     &peer,
-                                    launch_guard_resync_interval(network, &peer),
+                                    sync_gate_resync_interval(network, &peer),
                                 ) {
                                     let from = deeper_overlap_from(first0.height);
                                     let limit = MAX_BLOCKS_PER_MSG;
@@ -2551,7 +2577,7 @@ fn handle_peer(
                         } else {
                             // No common ancestor in this window; ask for an older overlap
                             // instead of stalling on the same slice forever.
-                            if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                            if should_resync(&peer, sync_gate_resync_interval(network, &peer)) {
                                 let from = deeper_overlap_from(first0.height);
                                 let limit = MAX_BLOCKS_PER_MSG;
                                 let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
@@ -2590,7 +2616,7 @@ fn handle_peer(
                                 // Ask for an overlapping window so we can find the common ancestor and reorg.
                                 if should_resync(
                                     &peer,
-                                    launch_guard_resync_interval(network, &peer),
+                                    sync_gate_resync_interval(network, &peer),
                                 ) {
                                     let from = reorg_overlap_from(tip_h);
                                     let limit = MAX_BLOCKS_PER_MSG;
@@ -2607,7 +2633,7 @@ fn handle_peer(
                                 if first.height > tip_h + 1 {
                                     if should_resync(
                                         &peer,
-                                        launch_guard_resync_interval(network, &peer),
+                                        sync_gate_resync_interval(network, &peer),
                                     ) {
                                         let from = (tip_h + 1) as usize;
                                         let limit = 128usize;
@@ -2787,7 +2813,7 @@ fn handle_peer(
                     // ok normal extension
                 } else {
                     if block.height == tip_h + 1 {
-                        if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                        if should_resync(&peer, sync_gate_resync_interval(network, &peer)) {
                             let from = reorg_overlap_from(tip_h);
                             let limit = MAX_BLOCKS_PER_MSG;
                             let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
@@ -2857,7 +2883,7 @@ fn handle_peer(
                     if block.height != tip_h + 1 {
                         // Out-of-order / future block. Don't penalize; ask peer for the missing range.
                         if block.height > tip_h + 1 {
-                            if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                            if should_resync(&peer, sync_gate_resync_interval(network, &peer)) {
                                 let from = (tip_h + 1) as usize;
                                 let limit = 128usize;
                                 let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
@@ -2883,7 +2909,7 @@ fn handle_peer(
                                     if local_tip.hash32 != block.hash32 {
                                         if should_resync(
                                             &peer,
-                                            launch_guard_resync_interval(network, &peer),
+                                            sync_gate_resync_interval(network, &peer),
                                         ) {
                                             let from = tip_h.saturating_sub(1) as usize;
                                             let limit = MAX_BLOCKS_PER_MSG;
@@ -3002,6 +3028,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
         &Msg::Hello {
             net: net.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            genesis_hash: hello_genesis_hash(net),
         },
     )
     .map_err(|e| format!("hello_send_failed:{e}"))?;
@@ -3030,6 +3057,21 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                 }
                 if let Some(msg) = read_msg_line(line) {
                     match msg {
+                        Msg::Hello {
+                            net: peer_net,
+                            genesis_hash: peer_genesis_hash,
+                            ..
+                        } => {
+                            if peer_net != net {
+                                return Err(format!("wrong_network:peer_net={peer_net}"));
+                            }
+                            let expected_genesis_hash = hello_genesis_hash(net);
+                            if !peer_genesis_hash.eq_ignore_ascii_case(&expected_genesis_hash) {
+                                return Err(format!(
+                                    "wrong_genesis:peer_genesis_hash={peer_genesis_hash} local_genesis_hash={expected_genesis_hash}"
+                                ));
+                            }
+                        }
                         Msg::Tip { height, hash32, .. } => {
                             note_seen_height(height);
                             peer_tip_view = Some((height, hash32.clone()));
@@ -3245,7 +3287,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                             }
 
                             // Still doesn't connect: request overlap resync (with backoff) and avoid spam.
-                            let min_interval = launch_guard_resync_interval(network, addr);
+                            let min_interval = sync_gate_resync_interval(network, addr);
                             if should_resync(addr, min_interval) {
                                 let from = reorg_overlap_from(tip_h);
                                 // Keep limit modest; dial loop runs often.
@@ -3317,6 +3359,7 @@ pub fn broadcast_block(block: &ChainBlock) {
                 &Msg::Hello {
                     net: cfg.net.clone(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
+                    genesis_hash: hello_genesis_hash(&cfg.net),
                 },
             );
             let _ = send_msg(&mut stream, &tip_msg);
@@ -3361,6 +3404,7 @@ pub fn broadcast_tx(txid: &str, tx: &serde_json::Value) {
                 &Msg::Hello {
                     net: cfg.net.clone(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
+                    genesis_hash: hello_genesis_hash(&cfg.net),
                 },
             );
             let _ = send_msg(
@@ -3526,22 +3570,26 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 mod tests {
     use super::{
         ban_peer_manual, canonicalize_peer_token, is_transient_dial_error,
-        deeper_overlap_from, health_priority_sync_from, launch_guard_local_submit_ready,
-        launch_guard_mining_ready, list_banned_json, normalize_bootstrap_candidates,
+        deeper_overlap_from, health_priority_sync_from, sync_gate_local_submit_ready,
+        sync_gate_mining_ready, list_banned_json, normalize_bootstrap_candidates,
         official_tip_sync_from, parse_peers_text, read_line_limited, reorg_overlap_from,
         should_accept_reorg_candidate,
         should_prefer_backbone_tie_candidate, subnet24_key, unban_peer_manual,
         validate_block_basic, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
-    use duta_core::netparams::Network;
+    use duta_core::netparams::{self, Network};
     use std::io::{BufReader, Cursor};
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
 
-    fn launch_guard_test_lock() -> &'static Mutex<()> {
+    fn sync_gate_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn skip_when_sync_gate_disabled() -> bool {
+        !netparams::pow_bootstrap_sync_enabled(Network::Mainnet, 1, 0)
     }
 
     fn clear_test_peer_state() {
@@ -3563,8 +3611,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_guard_prefers_official_backbone_tie_candidate() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_prefers_official_backbone_tie_candidate() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::BEST_SEEN_HEIGHT.store(2, Ordering::Relaxed);
         super::note_outbound_peer_result(
@@ -3614,8 +3665,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_guard_rejects_local_submit_when_official_tip_competes_at_same_height() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_rejects_local_submit_when_official_tip_competes_at_same_height() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -3631,14 +3685,17 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let err = launch_guard_local_submit_ready(Network::Mainnet, 26, &"33".repeat(32), 22)
+        let err = sync_gate_local_submit_ready(Network::Mainnet, 26, &"33".repeat(32), 22)
             .unwrap_err();
-        assert!(err.starts_with("launch_guard_competing_official_tip"));
+        assert!(err.starts_with("sync_gate_competing_official_tip"));
     }
 
     #[test]
-    fn launch_guard_allows_local_submit_when_official_tip_matches() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_allows_local_submit_when_official_tip_matches() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -3654,7 +3711,7 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let ready = launch_guard_local_submit_ready(Network::Mainnet, 26, &"22".repeat(32), 22);
+        let ready = sync_gate_local_submit_ready(Network::Mainnet, 26, &"22".repeat(32), 22);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
@@ -3691,8 +3748,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_guard_allows_mining_during_hard_window_when_backbone_is_healthy() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_allows_mining_during_hard_window_when_backbone_is_healthy() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
 
         let now = std::time::Instant::now();
@@ -3720,7 +3780,7 @@ mod tests {
         }
 
         assert_eq!(
-            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12),
+            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12),
             Ok(())
         );
     }
@@ -3791,7 +3851,7 @@ mod tests {
 
     #[test]
     fn select_outbound_targets_prioritizes_official_backbone_peers() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         let targets = super::select_outbound_targets(
             &[
@@ -3809,7 +3869,7 @@ mod tests {
 
     #[test]
     fn block_broadcast_targets_include_official_backbone_first() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         let targets = super::select_block_broadcast_targets(
             &[
@@ -3889,17 +3949,23 @@ mod tests {
     }
 
     #[test]
-    fn launch_guard_requires_official_backbone_peer_on_mainnet() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_requires_official_backbone_peer_on_mainnet() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         let err =
-            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
-        assert!(err.starts_with("launch_guard_official_peer_insufficient"));
+            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        assert!(err.starts_with("sync_gate_official_peer_insufficient"));
     }
 
     #[test]
-    fn launch_guard_accepts_recent_official_backbone_peer_on_mainnet() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_accepts_recent_official_backbone_peer_on_mainnet() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -3909,7 +3975,7 @@ mod tests {
             None,
         );
         let err =
-            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.contains("official_backbone_peers=1"));
         super::note_outbound_peer_result(
             "seed2.dutago.xyz:19082",
@@ -3918,25 +3984,31 @@ mod tests {
             Some(&"11".repeat(32)),
             None,
         );
-        let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        let ready = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
     #[test]
-    fn launch_guard_accepts_recent_inbound_official_backbone_peer_on_mainnet() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_accepts_recent_inbound_official_backbone_peer_on_mainnet() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_inbound_peer_connected("seed1.dutago.xyz:19082");
         super::note_inbound_peer_tip("seed1.dutago.xyz:19082", 50, &"11".repeat(32));
         super::note_inbound_peer_connected("seed2.dutago.xyz:19082");
         super::note_inbound_peer_tip("seed2.dutago.xyz:19082", 50, &"11".repeat(32));
-        let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        let ready = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
     #[test]
-    fn launch_guard_rejects_official_backbone_height_mismatch() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_rejects_official_backbone_height_mismatch() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -3953,13 +4025,16 @@ mod tests {
             None,
         );
         let err =
-            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
-        assert!(err.starts_with("launch_guard_official_tip_mismatch"));
+            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        assert!(err.starts_with("sync_gate_official_tip_mismatch"));
     }
 
     #[test]
-    fn launch_guard_allows_one_block_of_backbone_lag_when_one_seed_matches_tip() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_allows_one_block_of_backbone_lag_when_one_seed_matches_tip() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -3975,13 +4050,16 @@ mod tests {
             Some(&"99".repeat(32)),
             None,
         );
-        let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        let ready = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
     #[test]
-    fn launch_guard_allows_when_all_backbone_peers_are_exactly_one_block_behind() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_allows_when_all_backbone_peers_are_exactly_one_block_behind() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -3997,13 +4075,16 @@ mod tests {
             Some(&"bb".repeat(32)),
             None,
         );
-        let ready = launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        let ready = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
         assert!(ready.is_err(), "unexpected ready state");
     }
 
     #[test]
-    fn launch_guard_allows_all_backbone_peers_one_block_behind_only_at_bootstrap_start() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_allows_all_backbone_peers_one_block_behind_only_at_bootstrap_start() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -4019,7 +4100,7 @@ mod tests {
             Some(&"bb".repeat(32)),
             None,
         );
-        let ready = launch_guard_mining_ready(Network::Mainnet, 1, &"11".repeat(32), 12);
+        let ready = sync_gate_mining_ready(Network::Mainnet, 1, &"11".repeat(32), 12);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
@@ -4088,8 +4169,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_guard_rejects_backbone_that_lags_more_than_one_block() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_rejects_backbone_that_lags_more_than_one_block() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -4106,13 +4190,16 @@ mod tests {
             None,
         );
         let err =
-            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
-        assert!(err.starts_with("launch_guard_official_tip_mismatch"));
+            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        assert!(err.starts_with("sync_gate_official_tip_mismatch"));
     }
 
     #[test]
-    fn launch_guard_rejects_conflicting_hash_at_same_height() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_rejects_conflicting_hash_at_same_height() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::note_outbound_peer_result(
             "seed1.dutago.xyz:19082",
@@ -4129,13 +4216,16 @@ mod tests {
             None,
         );
         let err =
-            launch_guard_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
-        assert!(err.starts_with("launch_guard_official_tip_mismatch"));
+            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        assert!(err.starts_with("sync_gate_official_tip_mismatch"));
     }
 
     #[test]
-    fn launch_guard_is_inactive_after_guard_window() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_is_inactive_after_bootstrap_window() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::BEST_SEEN_HEIGHT.store(2000, Ordering::Relaxed);
         super::note_outbound_peer_result(
@@ -4152,13 +4242,16 @@ mod tests {
             Some(&"11".repeat(32)),
             None,
         );
-        let ready = launch_guard_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22);
+        let ready = sync_gate_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
     #[test]
-    fn launch_guard_stays_active_after_guard_window_if_network_is_unhealthy() {
-        let _guard = launch_guard_test_lock().lock().unwrap();
+    fn sync_gate_stays_active_after_bootstrap_window_if_network_is_unhealthy() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
         super::BEST_SEEN_HEIGHT.store(2050, Ordering::Relaxed);
         super::note_outbound_peer_result(
@@ -4169,10 +4262,11 @@ mod tests {
             None,
         );
         let err =
-            launch_guard_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22).unwrap_err();
+            sync_gate_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22).unwrap_err();
         assert!(
-            err.starts_with("launch_guard_syncing")
-                || err.starts_with("launch_guard_official_peer_insufficient")
+            err.starts_with("sync_gate_syncing")
+                || err.starts_with("sync_gate_official_peer_insufficient")
         );
     }
 }
+

@@ -25,8 +25,7 @@ pub fn init(data_dir: &str) -> io::Result<()> {
 }
 
 fn ts_prefix() -> String {
-    let format =
-        format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").ok();
+    let format = format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").ok();
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let rendered = match format {
         Some(fmt) => OffsetDateTime::now_utc()

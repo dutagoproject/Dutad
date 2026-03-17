@@ -201,14 +201,12 @@ fn enforce_mempool_caps(mp: &mut serde_json::Value) -> HashSet<String> {
             candidates.push((k.clone(), fee_k, sz));
         }
 
-        candidates.sort_by(|a, b| {
-            match feerate_cmp(a.1, a.2, b.1, b.2) {
-                std::cmp::Ordering::Equal => match a.1.cmp(&b.1) {
-                    std::cmp::Ordering::Equal => a.0.cmp(&b.0),
-                    o => o,
-                },
+        candidates.sort_by(|a, b| match feerate_cmp(a.1, a.2, b.1, b.2) {
+            std::cmp::Ordering::Equal => match a.1.cmp(&b.1) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
                 o => o,
-            }
+            },
+            o => o,
         });
 
         if let Some((victim, _vf, _vs)) = candidates.first().cloned() {
@@ -358,8 +356,12 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
 
     if let Some(old_ids) = mp.get("txids").and_then(|x| x.as_array()) {
         for item in old_ids {
-            let Some(old_key) = item.as_str() else { continue };
-            let Some(txv) = txs_obj.get(old_key) else { continue };
+            let Some(old_key) = item.as_str() else {
+                continue;
+            };
+            let Some(txv) = txs_obj.get(old_key) else {
+                continue;
+            };
             let mut tx_for_id = txv.clone();
             if let Some(obj) = tx_for_id.as_object_mut() {
                 obj.remove("fee");
@@ -394,7 +396,8 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
 
     if changed {
         mp["txs"] = serde_json::Value::Object(new_txs);
-        mp["txids"] = serde_json::Value::Array(ordered.into_iter().map(serde_json::Value::String).collect());
+        mp["txids"] =
+            serde_json::Value::Array(ordered.into_iter().map(serde_json::Value::String).collect());
         Some(mp)
     } else {
         None
@@ -849,7 +852,7 @@ pub fn handle_submit_tx(
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_mempool_caps, rebuild_mempool_txids, parse_submit_tx_request, txid_is_valid,
+        enforce_mempool_caps, parse_submit_tx_request, rebuild_mempool_txids, txid_is_valid,
     };
     use serde_json::json;
 
@@ -930,7 +933,10 @@ mod tests {
         rebuild_mempool_txids(&mut mp);
         let txids = mp["txids"].as_array().cloned().unwrap_or_default();
         assert_eq!(txids.len(), super::MAX_MEMPOOL_TXS);
-        assert_eq!(mp["txs"].as_object().map(|o| o.len()), Some(super::MAX_MEMPOOL_TXS));
+        assert_eq!(
+            mp["txs"].as_object().map(|o| o.len()),
+            Some(super::MAX_MEMPOOL_TXS)
+        );
         for txid in txids {
             let key = txid.as_str().expect("txid string");
             assert!(mp["txs"].get(key).is_some());

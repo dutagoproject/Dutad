@@ -107,7 +107,8 @@ fn log_work_reject_once(message: &str) {
     match state.as_ref() {
         Some((last_msg, last_at))
             if last_msg == message
-                && now.duration_since(*last_at) < Duration::from_secs(WORK_REJECT_LOG_INTERVAL_SECS) =>
+                && now.duration_since(*last_at)
+                    < Duration::from_secs(WORK_REJECT_LOG_INTERVAL_SECS) =>
         {
             return;
         }
@@ -119,7 +120,7 @@ fn log_work_reject_once(message: &str) {
 }
 
 const MIN_POLL_MS: u64 = 50;
-const GUARDED_BACKOFF_MS: u64 = 2_000;
+const SYNC_BACKOFF_MS: u64 = 2_000;
 const BUSY_BACKOFF_MS: u64 = 1_000;
 const RPC_TIMEOUT_SECS: u64 = 5;
 
@@ -200,12 +201,9 @@ fn http_request(
     req: &[u8],
     timeout: Duration,
 ) -> Result<(String, Option<u16>), String> {
-    let mut stream =
-        TcpStream::connect((host, port)).map_err(|e| {
-            format!(
-                "rpc_connection_failed_check_ip_firewall host={host} port={port} err={e}"
-            )
-        })?;
+    let mut stream = TcpStream::connect((host, port)).map_err(|e| {
+        format!("rpc_connection_failed_check_ip_firewall host={host} port={port} err={e}")
+    })?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     let _ = stream.set_nonblocking(false);
@@ -270,7 +268,12 @@ fn http_get(url: &str, path: &str) -> Result<(String, Option<u16>), String> {
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: dutaminer\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
-    http_request(&host, port, req.as_bytes(), Duration::from_secs(RPC_TIMEOUT_SECS))
+    http_request(
+        &host,
+        port,
+        req.as_bytes(),
+        Duration::from_secs(RPC_TIMEOUT_SECS),
+    )
 }
 
 fn http_post_json(url: &str, path: &str, body: &str) -> Result<(String, Option<u16>), String> {
@@ -280,7 +283,12 @@ fn http_post_json(url: &str, path: &str, body: &str) -> Result<(String, Option<u
         body.len(),
         body
     );
-    http_request(&host, port, req.as_bytes(), Duration::from_secs(RPC_TIMEOUT_SECS))
+    http_request(
+        &host,
+        port,
+        req.as_bytes(),
+        Duration::from_secs(RPC_TIMEOUT_SECS),
+    )
 }
 
 fn guess_mining_port_base(rpc_base: &str) -> Option<String> {
@@ -484,10 +492,10 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
 }
 
 fn is_sync_submit_reject(reason: &str, detail: &str, message: &str) -> bool {
-    reason.contains("launch_guard")
-        || detail.contains("launch_guard_")
-        || detail.contains("waiting_for_official_chain_sync")
-        || message.contains("waiting for official chain sync")
+    reason.contains("sync_gate")
+        || detail.contains("sync_gate_")
+        || detail.contains("waiting_for_backbone_sync")
+        || message.contains("waiting for backbone sync")
         || message.contains("waiting for launch sync")
 }
 
@@ -497,11 +505,11 @@ fn work_retry_delay_ms(http_code: Option<u16>, body: &str, poll_ms: u64) -> u64 
     };
     let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
     let detail = v.get("detail").map(|x| x.to_string()).unwrap_or_default();
-    if err == "launch_guard_not_ready" || detail.contains("launch_guard_") {
-        return poll_ms.max(GUARDED_BACKOFF_MS);
+    if err == "sync_not_ready" || detail.contains("sync_gate_") {
+        return poll_ms.max(SYNC_BACKOFF_MS);
     }
     if err == "syncing" || detail.contains("syncing") {
-        return poll_ms.max(GUARDED_BACKOFF_MS);
+        return poll_ms.max(SYNC_BACKOFF_MS);
     }
     if err == "busy" || err == "too_many_outstanding_work" {
         return poll_ms.max(BUSY_BACKOFF_MS);
@@ -518,17 +526,20 @@ fn explain_work_fetch_reject(http_code: Option<u16>, body: &str) {
         eprintln!("work fetch http_code={} raw={}", code, body);
         return;
     };
-    let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("unknown_error");
+    let err = v
+        .get("error")
+        .and_then(|x| x.as_str())
+        .unwrap_or("unknown_error");
     let detail = v.get("detail").map(|x| x.to_string()).unwrap_or_default();
     match err {
-        "launch_guard_not_ready" => {
-            let msg = if detail.contains("launch_guard_solo_bootstrap") {
+        "sync_not_ready" => {
+            let msg = if detail.contains("sync_gate_solo_bootstrap") {
                 "solo mining is temporarily limited during early launch"
-            } else if detail.contains("launch_guard_official_tip_mismatch")
-                || detail.contains("launch_guard_competing_official_tip")
-                || detail.contains("launch_guard_official_ahead")
+            } else if detail.contains("sync_gate_official_tip_mismatch")
+                || detail.contains("sync_gate_competing_official_tip")
+                || detail.contains("sync_gate_official_ahead")
             {
-                "work update pending: waiting for official chain sync"
+                "work update pending: waiting for backbone sync"
             } else {
                 "work update pending: waiting for launch sync"
             };
@@ -544,7 +555,10 @@ fn explain_work_fetch_reject(http_code: Option<u16>, body: &str) {
             log_work_reject_once("work update pending: miner queue is full, retrying");
         }
         _ => {
-            eprintln!("work fetch http_code={} error={} detail={}", code, err, detail);
+            eprintln!(
+                "work fetch http_code={} error={} detail={}",
+                code, err, detail
+            );
         }
     }
 }
@@ -610,7 +624,10 @@ fn main() -> Result<(), String> {
     let mut last_hs: f64 = 0.0;
 
     loop {
-        let (w_body, w_code) = match http_get(&rpc, &format!("/work?address={}&hs={}", args.address, last_hs)) {
+        let (w_body, w_code) = match http_get(
+            &rpc,
+            &format!("/work?address={}&hs={}", args.address, last_hs),
+        ) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("work fetch error: {e}");
@@ -632,8 +649,7 @@ fn main() -> Result<(), String> {
                 // instead of mining port (18085/19085). If we see 404, try the known mining port once.
                 if c == 404 {
                     if let Some(alt) = guess_mining_port_base(&rpc) {
-                        let alt_work_url =
-                            format!("/work?address={}&hs={}", args.address, last_hs);
+                        let alt_work_url = format!("/work?address={}&hs={}", args.address, last_hs);
                         if let Ok((_alt_body, alt_code)) = http_get(&alt, &alt_work_url) {
                             if alt_code == Some(200) {
                                 eprintln!(
@@ -775,7 +791,9 @@ fn main() -> Result<(), String> {
         last_hs = hs;
 
         // Best-effort: query aggregated wallet hashrate from server
-        if let Ok((st_body, st_code)) = http_get(&rpc, &format!("/minerstats?address={}", args.address)) {
+        if let Ok((st_body, st_code)) =
+            http_get(&rpc, &format!("/minerstats?address={}", args.address))
+        {
             if st_code == Some(200) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&st_body) {
                     let miners = v.get("miners").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -806,7 +824,7 @@ fn main() -> Result<(), String> {
 mod tests {
     use super::{
         normalized_poll_ms, resolve_runtime_args, work_retry_delay_ms, Args, BUSY_BACKOFF_MS,
-        GUARDED_BACKOFF_MS, MIN_POLL_MS,
+        MIN_POLL_MS, SYNC_BACKOFF_MS,
     };
     use clap::Parser;
     use std::fs;
@@ -821,18 +839,22 @@ mod tests {
     }
 
     #[test]
-    fn work_reject_backoff_escalates_for_launch_guard_and_busy_conditions() {
+    fn work_reject_backoff_escalates_for_sync_gate_and_busy_conditions() {
         assert_eq!(
             work_retry_delay_ms(
                 Some(503),
-                r#"{"error":"launch_guard_not_ready","detail":"launch_guard_official_peer_insufficient"}"#,
+                r#"{"error":"sync_not_ready","detail":"sync_gate_official_peer_insufficient"}"#,
                 200
             ),
-            GUARDED_BACKOFF_MS
+            SYNC_BACKOFF_MS
         );
         assert_eq!(
-            work_retry_delay_ms(Some(503), r#"{"error":"syncing","detail":"syncing tip_height=5"}"#, 200),
-            GUARDED_BACKOFF_MS
+            work_retry_delay_ms(
+                Some(503),
+                r#"{"error":"syncing","detail":"syncing tip_height=5"}"#,
+                200
+            ),
+            SYNC_BACKOFF_MS
         );
         assert_eq!(
             work_retry_delay_ms(Some(429), r#"{"error":"too_many_outstanding_work"}"#, 200),
@@ -842,10 +864,7 @@ mod tests {
 
     #[test]
     fn config_file_is_loaded_and_cli_overrides_it() {
-        let path = std::env::temp_dir().join(format!(
-            "dutaminer-test-{}.json",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("dutaminer-test-{}.json", std::process::id()));
         fs::write(
             &path,
             r#"{"rpc":"http://127.0.0.1:19085","address":"dutcfg","threads":3,"poll_ms":450}"#,
@@ -866,3 +885,4 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 }
+

@@ -5,7 +5,7 @@ use duta_core::dutahash;
 use duta_core::hash;
 use duta_core::netparams::{
     devfee_addrs, devfee_bps, genesis_hash, pow_launch_difficulty_hardening_enabled,
-    pow_launch_guard_recent_span, pow_max_bits, pow_min_bits, pow_retarget_window, pow_start_bits,
+    pow_bootstrap_sync_recent_span, pow_max_bits, pow_min_bits, pow_retarget_window, pow_start_bits,
     pow_target_secs, Network,
 };
 use duta_core::types::H32;
@@ -375,7 +375,7 @@ fn expected_bits_for_next_height(
     let last = block_at_from_tree(blocks, next_height - 1)
         .ok_or_else(|| "prev_block_missing".to_string())?;
     let mut bits = last.bits;
-    let launch_guard = pow_launch_difficulty_hardening_enabled(net, next_height, bits);
+    let sync_gate = pow_launch_difficulty_hardening_enabled(net, next_height, bits);
 
     // Special-case window=1: we need two distinct timestamps (prev block and its parent).
     // The generic anchor logic below would pick the same block for first/last and always
@@ -398,7 +398,7 @@ fn expected_bits_for_next_height(
 
         let actual = t_last - t_first;
         let target = pow_target_secs(net);
-        bits = if launch_guard {
+        bits = if sync_gate {
             adjust_bits_asymmetric(bits, actual, target, min_bits, max_bits)
         } else {
             adjust_bits_normal(bits, actual, target, min_bits, max_bits)
@@ -417,11 +417,11 @@ fn expected_bits_for_next_height(
     // - We only ever *increase* difficulty in this path (never decrease), and
     //   we reuse the same asymmetric adjustment caps.
     if (next_height - 1) % window != 0 {
-        // Launch guard is mainnet-only and temporary.
+        // Bootstrap sync hardening is mainnet-only and temporary.
         // Keep testnet/stagenet easy for testing and only protect early mainnet from
         // runaway fast blocks or sudden solo-mining bumps.
-        if launch_guard {
-            let recent_span = pow_launch_guard_recent_span(net);
+        if sync_gate {
+            let recent_span = pow_bootstrap_sync_recent_span(net);
             if recent_span > 0 && next_height > recent_span + 1 {
                 let span = recent_span.min(next_height.saturating_sub(1));
                 let first_h = (next_height - 1).saturating_sub(span);
@@ -434,7 +434,7 @@ fn expected_bits_for_next_height(
                         let target = pow_target_secs(net).saturating_mul(span);
 
                         // Only bump early if blocks are coming in much too fast.
-                        // This is intentionally softer than the old guard and auto-turns off.
+                        // This is intentionally softer than the old bootstrap sync gate and auto-turns off.
                         if actual > 0 && target > 0 && actual < (target / 3).max(1) {
                             bits =
                                 adjust_bits_capped(bits, actual, target, min_bits, max_bits, 1, 0);
@@ -465,7 +465,7 @@ fn expected_bits_for_next_height(
     let actual = t_last - t_first;
     let target = pow_target_secs(net).saturating_mul(window);
 
-    bits = if launch_guard {
+    bits = if sync_gate {
         adjust_bits_asymmetric(bits, actual, target, min_bits, max_bits)
     } else {
         adjust_bits_normal(bits, actual, target, min_bits, max_bits)
@@ -2324,3 +2324,4 @@ mod tests_a5 {
         );
     }
 }
+

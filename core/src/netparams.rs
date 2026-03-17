@@ -51,7 +51,7 @@ impl Network {
 
     pub fn default_data_dir_unix(&self) -> &'static str {
         match self {
-            Network::Mainnet => ".duta/mainnet",
+            Network::Mainnet => ".duta",
             Network::Testnet => ".duta/testnet",
             Network::Stagenet => ".duta/stagenet",
         }
@@ -169,33 +169,30 @@ pub fn pow_max_bits(_net: Network) -> u64 {
     60
 }
 
-pub fn pow_launch_guard_until_height(net: Network) -> u64 {
+pub fn pow_bootstrap_sync_until_height(net: Network) -> u64 {
     match net {
         Network::Mainnet => 500,
         Network::Testnet | Network::Stagenet => 0,
     }
 }
 
-pub fn pow_launch_guard_target_bits(net: Network) -> u64 {
+pub fn pow_bootstrap_sync_target_bits(net: Network) -> u64 {
     match net {
         Network::Mainnet => 21,
         Network::Testnet | Network::Stagenet => pow_start_bits(net),
     }
 }
 
-pub fn pow_launch_guard_recent_span(net: Network) -> u64 {
+pub fn pow_bootstrap_sync_recent_span(net: Network) -> u64 {
     match net {
         Network::Mainnet => 10,
         Network::Testnet | Network::Stagenet => 0,
     }
 }
 
-pub fn pow_launch_guard_enabled(net: Network, next_height: u64, current_bits: u64) -> bool {
+pub fn pow_bootstrap_sync_enabled(net: Network, _next_height: u64, _current_bits: u64) -> bool {
     match net {
-        Network::Mainnet => {
-            next_height <= pow_launch_guard_until_height(net)
-                && current_bits < pow_launch_guard_target_bits(net)
-        }
+        Network::Mainnet => false,
         Network::Testnet | Network::Stagenet => false,
     }
 }
@@ -208,7 +205,7 @@ pub fn pow_launch_difficulty_hardening_enabled(
     match net {
         // Difficulty-side hardening is disabled; bootstrap safety now relies on
         // backbone-first sync and mining readiness instead of asymmetric retargets.
-        Network::Mainnet => false && pow_launch_guard_enabled(net, next_height, current_bits),
+        Network::Mainnet => false && pow_bootstrap_sync_enabled(net, next_height, current_bits),
         Network::Testnet | Network::Stagenet => false,
     }
 }
@@ -352,13 +349,13 @@ mod tests {
     }
 
     #[test]
-    fn launch_guard_is_mainnet_only() {
-        assert!(pow_launch_guard_enabled(Network::Mainnet, 1, 12));
-        assert!(pow_launch_guard_enabled(Network::Mainnet, 500, 12));
-        assert!(!pow_launch_guard_enabled(Network::Mainnet, 501, 12));
-        assert!(!pow_launch_guard_enabled(Network::Mainnet, 1, 21));
-        assert!(!pow_launch_guard_enabled(Network::Testnet, 1, 8));
-        assert!(!pow_launch_guard_enabled(Network::Stagenet, 1, 10));
+    fn sync_gate_is_mainnet_only() {
+        assert!(pow_bootstrap_sync_enabled(Network::Mainnet, 1, 12));
+        assert!(pow_bootstrap_sync_enabled(Network::Mainnet, 500, 12));
+        assert!(!pow_bootstrap_sync_enabled(Network::Mainnet, 501, 12));
+        assert!(!pow_bootstrap_sync_enabled(Network::Mainnet, 1, 21));
+        assert!(!pow_bootstrap_sync_enabled(Network::Testnet, 1, 8));
+        assert!(!pow_bootstrap_sync_enabled(Network::Stagenet, 1, 10));
         assert!(!pow_launch_difficulty_hardening_enabled(
             Network::Mainnet,
             1,
@@ -376,3 +373,4 @@ mod tests {
         assert_eq!(devfee_bps(Network::Mainnet, year * 2), DEVFEE_BPS_STEADY);
     }
 }
+

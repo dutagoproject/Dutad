@@ -266,7 +266,12 @@ fn print_startup_banner(
     console_kv("PATH", ANSI_YELLOW, "data dir", data_dir);
     console_kv("P2P", ANSI_CYAN, "bind", p2p_addr);
     console_kv("RPC", ANSI_BLUE, "bind", rpc_addr);
-    console_kv("MINING", ANSI_GREEN, "bind", mining_addr.unwrap_or("disabled"));
+    console_kv(
+        "MINING",
+        ANSI_GREEN,
+        "bind",
+        mining_addr.unwrap_or("disabled"),
+    );
     println!();
 }
 
@@ -290,8 +295,8 @@ fn print_chain_status(data_dir: &str) {
             ANSI_YELLOW,
             format!(
                 "syncing ({:.2}%) best_seen_height={}",
-            sync_progress * 100.0,
-            best_seen_height
+                sync_progress * 100.0,
+                best_seen_height
             ),
         );
     } else {
@@ -300,7 +305,12 @@ fn print_chain_status(data_dir: &str) {
 }
 
 fn print_startup_guidance(rpc_addr: &str) {
-    console_kv("RPC", ANSI_BLUE, "health", format!("http://{}/health", rpc_addr));
+    console_kv(
+        "RPC",
+        ANSI_BLUE,
+        "health",
+        format!("http://{}/health", rpc_addr),
+    );
     console_kv("RPC", ANSI_BLUE, "tip", format!("http://{}/tip", rpc_addr));
     console_line(
         "STATUS",
@@ -324,11 +334,11 @@ fn print_runtime_status_tick(data_dir: &str) {
         ANSI_CYAN,
         format!(
             "tip={} best_seen={} bits={} sync={:.2}% hash={}",
-        tip_height,
-        best_seen_height,
-        bits,
-        sync_progress * 100.0,
-        tip_hash
+            tip_height,
+            best_seen_height,
+            bits,
+            sync_progress * 100.0,
+            tip_hash
         ),
     );
 }
@@ -791,7 +801,10 @@ fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
         Err(_) => {
             println!("dutad: stopped");
             println!("rpc: {}", rpc_addr);
-            println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+            println!(
+                "rpc_reachable: {}",
+                if rpc_reachable { "yes" } else { "no" }
+            );
             return 1;
         }
     };
@@ -802,7 +815,10 @@ fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
             println!("dutad: stopped");
             println!("stale_pid_removed: invalid");
             println!("rpc: {}", rpc_addr);
-            println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+            println!(
+                "rpc_reachable: {}",
+                if rpc_reachable { "yes" } else { "no" }
+            );
             return 1;
         }
     };
@@ -810,18 +826,28 @@ fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
         println!("dutad: running");
         println!("pid: {}", pid);
         println!("rpc: {}", rpc_addr);
-        println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+        println!(
+            "rpc_reachable: {}",
+            if rpc_reachable { "yes" } else { "no" }
+        );
         return if rpc_reachable { 0 } else { 1 };
     }
     let _ = fs::remove_file(&pid_path);
     println!("dutad: stopped");
     println!("stale_pid_removed: {}", pid);
     println!("rpc: {}", rpc_addr);
-    println!("rpc_reachable: {}", if rpc_reachable { "yes" } else { "no" });
+    println!(
+        "rpc_reachable: {}",
+        if rpc_reachable { "yes" } else { "no" }
+    );
     1
 }
 
-fn wait_for_daemon_rpc_ready(rpc_addr: &str, child_pid: u32, timeout_ms: u64) -> Result<(), String> {
+fn wait_for_daemon_rpc_ready(
+    rpc_addr: &str,
+    child_pid: u32,
+    timeout_ms: u64,
+) -> Result<(), String> {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     let mut last_err = String::new();
     while std::time::Instant::now() < deadline {
@@ -1059,13 +1085,7 @@ fn request_is_loopback(request: &tiny_http::Request) -> bool {
 fn admin_path_requires_loopback(path: &str) -> bool {
     matches!(
         path,
-        "/rpc"
-            | "/submit_tx"
-            | "/rollback_to"
-            | "/prune"
-            | "/utxo"
-            | "/work"
-            | "/submit_work"
+        "/rpc" | "/submit_tx" | "/rollback_to" | "/prune" | "/utxo" | "/work" | "/submit_work"
     ) || path.starts_with("/work/")
 }
 
@@ -1713,9 +1733,8 @@ fn start_rpc_servers(
 
                 match store::rollback_to_height(&data_dir, target_h) {
                     Ok(()) => {
-                        let tip =
-                            serde_json::from_str::<serde_json::Value>(&tip_json(&data_dir))
-                                .unwrap_or(json!({}));
+                        let tip = serde_json::from_str::<serde_json::Value>(&tip_json(&data_dir))
+                            .unwrap_or(json!({}));
                         dlog!(
                             "daemon: ROLLBACK_OK target_height={} new_tip={}",
                             target_h,
@@ -2144,8 +2163,9 @@ fn main() {
     let p2p_addr_for_thread = p2p_addr.clone();
     let data_for_p2p = data_dir.clone();
     let net_for_p2p = net_str.clone();
-    let p2p_thread =
-        thread::spawn(move || p2p::start_p2p(p2p_addr_for_thread, data_for_p2p, net_for_p2p, seeds));
+    let p2p_thread = thread::spawn(move || {
+        p2p::start_p2p(p2p_addr_for_thread, data_for_p2p, net_for_p2p, seeds)
+    });
     print_startup_guidance(&rpc_addr);
 
     let running = Arc::new(AtomicBool::new(true));
@@ -2189,7 +2209,11 @@ fn main() {
         }
     }
 
-    console_line("STATUS", ANSI_YELLOW, "shutdown signal received, flushing database and stopping");
+    console_line(
+        "STATUS",
+        ANSI_YELLOW,
+        "shutdown signal received, flushing database and stopping",
+    );
     if let Err(e) = store::flush_db(&data_dir) {
         edlog!("daemon: SHUTDOWN_FLUSH_FAIL data={} err={}", data_dir, e);
         eprintln!("daemon: SHUTDOWN_FLUSH_FAIL data={} err={}", data_dir, e);
@@ -2243,7 +2267,9 @@ mod tests {
     #[test]
     fn private_and_loopback_ips_get_private_work_burst_policy() {
         assert!(ip_is_loopback_or_private(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-        assert!(ip_is_loopback_or_private(IpAddr::V4(Ipv4Addr::new(172, 16, 20, 22))));
+        assert!(ip_is_loopback_or_private(IpAddr::V4(Ipv4Addr::new(
+            172, 16, 20, 22
+        ))));
         assert!(ip_is_loopback_or_private(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         assert!(ip_is_loopback_or_private(IpAddr::V6(
             "fd00::22".parse().unwrap()

@@ -213,7 +213,10 @@ mod tests {
         store::bootstrap(&data_dir).unwrap();
 
         let hash = block_hash_at_height(&data_dir, 0).expect("genesis hash");
-        assert_eq!(hash, duta_core::netparams::genesis_hash(duta_core::netparams::Network::Mainnet));
+        assert_eq!(
+            hash,
+            duta_core::netparams::genesis_hash(duta_core::netparams::Network::Mainnet)
+        );
     }
 
     #[test]

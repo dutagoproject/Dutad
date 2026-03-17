@@ -244,7 +244,7 @@ fn compact_hex_from_leading_zero_bits(bits: u64) -> String {
 pub(crate) fn build_work_template(
     data_dir: &str,
     miner: &str,
-    official_pool_bypass: bool,
+    _official_pool_bypass: bool,
     work_scope: &str,
 ) -> Result<serde_json::Value, String> {
     let miner = miner.trim();
@@ -270,7 +270,7 @@ pub(crate) fn build_work_template(
         .and_then(|x| x.as_array())
         .cloned()
         .unwrap_or_default();
-    let (tip_h, tip_hash32, tip_bits, tip_chainwork) =
+    let (tip_h, tip_hash32, _tip_bits, tip_chainwork) =
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
 
     let best_h = p2p::best_seen_height();
@@ -280,10 +280,6 @@ pub(crate) fn build_work_template(
             tip_h, best_h
         ));
     }
-    if !official_pool_bypass {
-        p2p::launch_guard_mining_ready(net, tip_h, &tip_hash32, tip_bits)?;
-    }
-
     let height = tip_h + 1;
     let prevhash32 = tip_hash32;
     let bits = store::expected_bits_next(data_dir)?;
@@ -540,20 +536,6 @@ pub fn handle_work(
             );
             return;
         }
-        Err(e) if e.starts_with("launch_guard_") => {
-            wlog!(
-                "[dutad] WORK_REJECT addr={} reason=launch_guard detail={}",
-                short_addr(&miner),
-                e
-            );
-            crate::respond_error_detail(
-                request,
-                tiny_http::StatusCode(503),
-                "launch_guard_not_ready",
-                json!({"detail": crate::p2p::launch_guard_user_detail(&e)}),
-            );
-            return;
-        }
         Err(e) => {
             edlog!(
                 "[dutad] WORK_REJECT addr={} reason=template_failed detail={}",
@@ -677,7 +659,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        p.push(format!("duta-work-devfee-guard-{}", uniq));
+        p.push(format!("duta-work-devfee-check-{}", uniq));
         std::fs::create_dir_all(&p).unwrap();
         let data_dir = p.to_string_lossy().to_string();
         store::ensure_datadir_meta(&data_dir, "testnet").unwrap();

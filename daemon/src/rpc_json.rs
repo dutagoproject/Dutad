@@ -1154,14 +1154,14 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
                 "network": net,
                 "connections": p2p.get("connections").cloned().unwrap_or(json!(0)),
                 "best_seen_height": p2p.get("best_seen_height").cloned().unwrap_or(json!(0)),
-                "launch_guard_active": p2p.get("launch_guard_active").cloned().unwrap_or(json!(false)),
-                "launch_guard_hard_active": p2p.get("launch_guard_hard_active").cloned().unwrap_or(json!(false)),
-                "launch_guard_unhealthy": p2p.get("launch_guard_unhealthy").cloned().unwrap_or(json!(false)),
-                "launch_guard_tip_height": p2p.get("launch_guard_tip_height").cloned().unwrap_or(json!(0)),
-                "launch_guard_required_backbone_peers": p2p.get("launch_guard_required_backbone_peers").cloned().unwrap_or(json!(0)),
-                "launch_guard_backbone_peers": p2p.get("launch_guard_backbone_peers").cloned().unwrap_or(json!(0)),
-                "launch_guard_backbone_heights": p2p.get("launch_guard_backbone_heights").cloned().unwrap_or(json!([])),
-                "launch_guard_detail": p2p.get("launch_guard_detail").cloned().unwrap_or(serde_json::Value::Null),
+                "sync_gate_active": p2p.get("sync_gate_active").cloned().unwrap_or(json!(false)),
+                "sync_gate_hard_active": p2p.get("sync_gate_hard_active").cloned().unwrap_or(json!(false)),
+                "sync_gate_unhealthy": p2p.get("sync_gate_unhealthy").cloned().unwrap_or(json!(false)),
+                "sync_gate_tip_height": p2p.get("sync_gate_tip_height").cloned().unwrap_or(json!(0)),
+                "sync_gate_required_backbone_peers": p2p.get("sync_gate_required_backbone_peers").cloned().unwrap_or(json!(0)),
+                "sync_gate_backbone_peers": p2p.get("sync_gate_backbone_peers").cloned().unwrap_or(json!(0)),
+                "sync_gate_backbone_heights": p2p.get("sync_gate_backbone_heights").cloned().unwrap_or(json!([])),
+                "sync_gate_detail": p2p.get("sync_gate_detail").cloned().unwrap_or(serde_json::Value::Null),
                 "bootstrap_source": p2p.get("bootstrap_source").cloned().unwrap_or(json!("")),
                 "configured_seed_count": p2p.get("configured_seed_count").cloned().unwrap_or(json!(0)),
                 "seeds_file_count": p2p.get("seeds_file_count").cloned().unwrap_or(json!(0)),
@@ -1508,3 +1508,4 @@ mod tests {
         );
     }
 }
+
