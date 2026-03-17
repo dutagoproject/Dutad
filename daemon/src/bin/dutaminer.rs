@@ -91,34 +91,49 @@ struct WorkResp {
 static WORK_REJECT_LOG_STATE: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
 const WORK_REJECT_LOG_INTERVAL_SECS: u64 = 15;
 const ANSI_RESET: &str = "\x1b[0m";
-const ANSI_RED: &str = "\x1b[97;41m";
-const ANSI_GREEN: &str = "\x1b[30;42m";
-const ANSI_YELLOW: &str = "\x1b[30;43m";
-const ANSI_BLUE: &str = "\x1b[97;44m";
-const ANSI_CYAN: &str = "\x1b[30;46m";
+const C_MINER: &str = "\x1b[30;45m";
+const C_NET: &str = "\x1b[97;44m";
+const C_OK: &str = "\x1b[30;42m";
+const C_ERR: &str = "\x1b[97;41m";
 
-fn paint(tag: &str, color: &str) -> String {
-    format!("{color}{tag}{ANSI_RESET}")
+fn now_ts() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let secs = now % 86_400;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
-fn info_tag() -> String {
-    paint("INFO", ANSI_BLUE)
+fn log_tag(color: &str, tag: &str, msg: impl AsRef<str>) {
+    let ts = now_ts();
+    eprintln!(
+        "[{}]  {} {:<8} {} {}",
+        ts,
+        color,
+        tag,
+        ANSI_RESET,
+        msg.as_ref()
+    );
 }
 
-fn work_tag() -> String {
-    paint("WORK", ANSI_GREEN)
+fn log_miner(msg: impl AsRef<str>) {
+    log_tag(C_MINER, "miner", msg);
 }
 
-fn wait_tag() -> String {
-    paint("WAIT", ANSI_YELLOW)
+fn log_net(msg: impl AsRef<str>) {
+    log_tag(C_NET, "net", msg);
 }
 
-fn ok_tag() -> String {
-    paint("OK", ANSI_CYAN)
+fn log_ok(msg: impl AsRef<str>) {
+    log_tag(C_OK, "cpu", msg);
 }
 
-fn err_tag() -> String {
-    paint("ERR", ANSI_RED)
+fn log_err(msg: impl AsRef<str>) {
+    log_tag(C_ERR, "net", msg);
 }
 
 fn work_reject_log_state() -> &'static Mutex<Option<(String, Instant)>> {
@@ -130,7 +145,7 @@ fn log_work_reject_once(message: &str) {
     let mut state = match work_reject_log_state().lock() {
         Ok(g) => g,
         Err(_) => {
-            eprintln!("{} {}", wait_tag(), message);
+            log_net(message);
             return;
         }
     };
@@ -144,7 +159,7 @@ fn log_work_reject_once(message: &str) {
         }
         _ => {
             *state = Some((message.to_string(), now));
-            eprintln!("{} {}", wait_tag(), message);
+            log_net(message);
         }
     }
 }
@@ -423,11 +438,10 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => {
-            println!(
-                "REJECTED share: invalid response (http_code={}) hash={}",
+            log_err(format!(
+                "rejected share: invalid response http_code={} hash={}",
                 code, mined_hash32
-            );
-            println!("reason=invalid");
+            ));
             return;
         }
     };
@@ -438,9 +452,9 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
             let h = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
             let hash = v.get("hash32").and_then(|x| x.as_str()).unwrap_or("");
             if !hash.is_empty() {
-                println!("{} accepted block: height={} hash={}", ok_tag(), h, hash);
+                log_ok(format!("accepted block: height={} hash={}", h, hash));
             } else {
-                println!("{} accepted share: height={}", ok_tag(), h);
+                log_ok(format!("accepted share: height={}", h));
             }
             return;
         }
@@ -455,19 +469,17 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 .and_then(|x| x.as_str())
                 .unwrap_or("Share rejected.");
             if is_sync_submit_reject(reason, detail, msg) {
-                println!(
+                log_net(format!(
                     "share update pending: waiting for chain sync; miner will retry automatically. hash={}",
                     mined_hash32
-                );
+                ));
                 return;
             }
             if reason == "stale" || v.get("reject_reason").and_then(|x| x.as_str()) == Some("stale") {
-                println!("REJECTED share: Share rejected: stale share (submitted too late)");
+                log_err("rejected share: submitted too late");
                 return;
             }
-            println!("REJECTED share: {} hash={}", msg, mined_hash32);
-            println!("reason={}", reason);
-            println!("raw={}", body);
+            log_err(format!("rejected share: {} hash={}", msg, mined_hash32));
             return;
         }
     }
@@ -476,7 +488,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
     if code == 200 && v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
         let h = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
         let hash = v.get("hash32").and_then(|x| x.as_str()).unwrap_or("");
-        println!("{} accepted block: height={} hash={}", ok_tag(), h, hash);
+        log_ok(format!("accepted block: height={} hash={}", h, hash));
         return;
     }
 
@@ -488,57 +500,50 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
 
     match err {
         "stale_work" => {
-            println!("REJECTED share: Share rejected: stale share (submitted too late)");
+            log_err("rejected share: submitted too late");
         }
         "pow_invalid" => {
-            println!(
-                "REJECTED share: Share rejected: low difficulty (does not meet target). hash={}",
+            log_err(format!(
+                "rejected share: low difficulty hash={}",
                 mined_hash32
-            );
-            println!("reason=low_difficulty");
-            println!("raw={}", body);
+            ));
         }
         "accept_failed" => {
             if is_sync_submit_reject(err, detail, detail) {
-                println!(
+                log_net(format!(
                     "share update pending: waiting for chain sync; miner will retry automatically. hash={}",
                     mined_hash32
-                );
+                ));
             } else if detail.contains("stale_or_out_of_order_block") {
-                println!("REJECTED share: Share rejected: stale share (submitted too late)");
+                log_err("rejected share: submitted too late");
             } else if detail.contains("bad_prevhash") || detail.contains("bits_invalid") {
-                println!("REJECTED share: Share rejected: work mismatch (chain tip changed). Please fetch new work. hash={}", mined_hash32);
-                println!("reason=work_mismatch");
+                log_err(format!(
+                    "rejected share: work mismatch. hash={}",
+                    mined_hash32
+                ));
             } else {
                 if detail.is_empty() {
-                    println!(
-                        "REJECTED share: Share rejected: invalid share. hash={}",
-                        mined_hash32
-                    );
+                    log_err(format!("rejected share: invalid share hash={}", mined_hash32));
                 } else {
-                    println!(
-                        "REJECTED share: Share rejected: invalid share ({}). hash={}",
+                    log_err(format!(
+                        "rejected share: invalid share ({}) hash={}",
                         detail, mined_hash32
-                    );
+                    ));
                 }
-                println!("reason=invalid");
             }
-            println!("raw={}", body);
         }
         _ => {
             if detail.is_empty() {
-                println!(
-                    "REJECTED share: Share rejected: invalid share ({}). hash={}",
+                log_err(format!(
+                    "rejected share: invalid share ({}) hash={}",
                     err, mined_hash32
-                );
+                ));
             } else {
-                println!(
-                    "REJECTED share: Share rejected: invalid share ({}: {}). hash={}",
+                log_err(format!(
+                    "rejected share: invalid share ({}: {}) hash={}",
                     err, detail, mined_hash32
-                );
+                ));
             }
-            println!("reason=invalid");
-            println!("raw={}", body);
         }
     }
 }
@@ -657,10 +662,10 @@ fn main() -> Result<(), String> {
     let args = resolve_runtime_args(&Args::parse())?;
     let poll_ms = normalized_poll_ms(args.poll_ms);
     if poll_ms != args.poll_ms {
-        eprintln!(
-            "dutaminer: poll_ms={} too low, using {}ms minimum",
+        log_net(format!(
+            "poll_ms={} too low, using {}ms minimum",
             args.poll_ms, poll_ms
-        );
+        ));
     }
 
     // Dataset cache keyed by (epoch, anchor_hash32, mem_mb)
@@ -668,11 +673,10 @@ fn main() -> Result<(), String> {
     let mut cached_dataset: Arc<Vec<u8>> = Arc::new(Vec::new());
 
     let mut rpc = args.rpc.trim_end_matches('/').to_string();
-    println!(
-        "{} dutaminer: rpc={} address={} threads={} poll_ms={}",
-        info_tag(),
+    log_miner(format!(
+        "start rpc={} address={} threads={} poll_ms={}",
         rpc, args.address, args.threads, poll_ms
-    );
+    ));
 
     let mut last_hs: f64 = 0.0;
 
@@ -683,14 +687,14 @@ fn main() -> Result<(), String> {
         ) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("work fetch error: {e}");
+                log_err(format!("work fetch error: {}", e));
                 if e.contains("rpc_connection_failed_check_ip_firewall")
                     || e.contains("rpc_connection_timeout_check_ip_firewall")
                 {
-                    eprintln!(
-                        "RPC Connection Failed - Check IP/Firewall (rpc={} timeout={}s)",
+                    log_err(format!(
+                        "rpc connection failed. check ip/firewall rpc={} timeout={}s",
                         rpc, RPC_TIMEOUT_SECS
-                    );
+                    ));
                 }
                 thread::sleep(Duration::from_millis(poll_ms));
                 continue;
@@ -705,18 +709,18 @@ fn main() -> Result<(), String> {
                         let alt_work_url = format!("/work?address={}&hs={}", args.address, last_hs);
                         if let Ok((_alt_body, alt_code)) = http_get(&alt, &alt_work_url) {
                             if alt_code == Some(200) {
-                                eprintln!(
+                                log_net(format!(
                                     "work got 404 on {}; switching to mining port {}",
                                     rpc, alt
-                                );
+                                ));
                                 rpc = alt;
                                 // Retry immediately on the corrected port
                                 continue;
                             } else {
-                                eprintln!(
-                                    "work fetch http_code={} raw={} (also tried {} http_code={:?})",
-                                    c, w_body, alt, alt_code
-                                );
+                                log_err(format!(
+                                    "work fetch http_code={} (also tried {} http_code={:?})",
+                                    c, alt, alt_code
+                                ));
                                 thread::sleep(Duration::from_millis(poll_ms));
                                 continue;
                             }
@@ -737,7 +741,7 @@ fn main() -> Result<(), String> {
         let w: WorkResp = match serde_json::from_str(&w_body) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("work json parse error: {e}; raw={w_body}");
+                log_err(format!("work json parse error: {}", e));
                 thread::sleep(Duration::from_millis(poll_ms));
                 continue;
             }
@@ -748,11 +752,10 @@ fn main() -> Result<(), String> {
         {
             let diff = expected_hashes(w.bits).unwrap_or(0);
             let diff_s = format_hash_units(diff);
-            println!(
-                "{} height={} bits={} difficulty={} epoch={} mem_mb={} ttl={}s work_id={}",
-                work_tag(),
+            log_net(format!(
+                "new work height={} bits={} difficulty={} epoch={} mem_mb={} ttl={}s work_id={}",
                 w.height, w.bits, diff_s, w.epoch, w.mem_mb, ttl, w.work_id
-            );
+            ));
         }
         let key = (w.epoch, w.anchor_hash32.clone(), w.mem_mb);
         if cache_key.as_ref() != Some(&key) {
@@ -760,7 +763,7 @@ fn main() -> Result<(), String> {
             let ds = dutahash::build_dataset_for_epoch(w.epoch, anchor, w.mem_mb);
             cached_dataset = Arc::new(ds);
             cache_key = Some(key);
-            println!("{} dataset built: epoch={} mem_mb={}", info_tag(), w.epoch, w.mem_mb);
+            log_miner(format!("dataset built: epoch={} mem_mb={}", w.epoch, w.mem_mb));
         }
 
         // Assemble canonical header bytes used by daemon's remote-mining implementation:
@@ -821,13 +824,12 @@ fn main() -> Result<(), String> {
             Some(n) => n,
             None => {
                 let ttl = w.expires_at.saturating_sub(now_unix());
-                eprintln!(
-                    "{} still mining height={} (bits={}, time_left={}); checking for a new job...",
-                    wait_tag(),
+                log_net(format!(
+                    "still mining height={} (bits={}, time_left={}); checking for a new job...",
                     w.height,
                     w.bits,
                     fmt_secs(ttl)
-                );
+                ));
                 thread::sleep(Duration::from_millis(poll_ms));
                 continue;
             }
@@ -841,11 +843,10 @@ fn main() -> Result<(), String> {
         let mined_digest = dutahash::pow_digest(&header, nonce, w.height, anchor, &dataset);
         let mined_hash32 = mined_digest.to_hex();
 
-        println!(
-            "{} hashrate: {} (hashes={} elapsed={:.2}s)",
-            info_tag(),
+        log_miner(format!(
+            "hashrate={} hashes={} elapsed={:.2}s",
             hs_str, total_hashes as u64, elapsed
-        );
+        ));
         last_hs = hs;
 
         // Best-effort: query aggregated wallet hashrate from server
@@ -856,12 +857,11 @@ fn main() -> Result<(), String> {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&st_body) {
                     let miners = v.get("miners").and_then(|x| x.as_u64()).unwrap_or(0);
                     let total_hs = v.get("total_hs").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                    println!(
-                        "{} wallet total hashrate: {} (miners={})",
-                        info_tag(),
+                    log_miner(format!(
+                        "wallet total hashrate={} miners={}",
                         format_hashrate(total_hs),
                         miners
-                    );
+                    ));
                 }
             }
         }
@@ -869,10 +869,10 @@ fn main() -> Result<(), String> {
         let body = json!({"work_id": w.work_id, "nonce": nonce}).to_string();
         match http_post_json(&rpc, "/submit_work", &body) {
             Ok((resp_body, resp_code)) => {
-                println!("{} submit: nonce={} work_id={}", info_tag(), nonce, w.work_id);
+                log_net(format!("submit nonce={} work_id={}", nonce, w.work_id));
                 explain_submit_result(resp_code, &resp_body, &mined_hash32);
             }
-            Err(e) => eprintln!("{} submit error: {e}", err_tag()),
+            Err(e) => log_err(format!("submit error: {}", e)),
         }
 
         thread::sleep(Duration::from_millis(20));
