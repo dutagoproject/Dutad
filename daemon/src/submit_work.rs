@@ -78,7 +78,11 @@ fn submit_cache_prune(m: &mut HashMap<String, SubmitCacheEntry>, now: u64) {
     m.retain(|_, v| v.expires_at > now);
 }
 
-fn cache_submit_result(work_id: &str, status: u16, body: &str) {
+fn submit_cache_key(work_id: &str, nonce: u64) -> String {
+    format!("{}:{:016x}", work_id, nonce)
+}
+
+fn cache_submit_result(work_id: &str, nonce: u64, status: u16, body: &str) {
     if work_id.is_empty() {
         return;
     }
@@ -87,7 +91,7 @@ fn cache_submit_result(work_id: &str, status: u16, body: &str) {
     let mut m = submit_cache_lock();
     submit_cache_prune(&mut m, now);
     m.insert(
-        work_id.to_string(),
+        submit_cache_key(work_id, nonce),
         SubmitCacheEntry {
             expires_at: now.saturating_add(600),
             status,
@@ -531,15 +535,16 @@ pub fn handle_submit_work(
         wlog!("[dutad] SUBMIT work={} nonce={}", short_id(work_id), nonce);
     }
 
-    // Phase 2B: idempotent submit_work. If the same work_id is retried, return cached response.
+    // Only exact retries of the same work+nonce should hit the idempotency cache.
     {
         let now = now_ts();
         let mut m = submit_cache_lock();
         submit_cache_prune(&mut m, now);
-        if let Some(ent) = m.get(work_id) {
+        if let Some(ent) = m.get(&submit_cache_key(work_id, nonce)) {
             wlog!(
-                "[dutad] SUBMIT_DUP work={} status={}",
+                "[dutad] SUBMIT_DUP work={} nonce={} status={}",
                 short_id(work_id),
+                nonce,
                 ent.status
             );
             respond_json(request, tiny_http::StatusCode(ent.status), ent.body.clone());
@@ -561,7 +566,7 @@ pub fn handle_submit_work(
                 "[dutad] SUBMIT_REJECT work={} reason=stale_work",
                 short_id(work_id)
             );
-            cache_submit_result(work_id, 410, &body);
+            cache_submit_result(work_id, nonce, 410, &body);
             respond_json(request, tiny_http::StatusCode(410), body);
             return;
         }
@@ -578,7 +583,7 @@ pub fn handle_submit_work(
                 "[dutad] SUBMIT_REJECT work={} reason=low_difficulty",
                 short_id(work_id)
             );
-            cache_submit_result(work_id, 422, &body);
+            cache_submit_result(work_id, nonce, 422, &body);
             respond_json(request, tiny_http::StatusCode(422), body);
             return;
         }
@@ -592,7 +597,7 @@ pub fn handle_submit_work(
                 reason,
                 detail
             );
-            cache_submit_result(work_id, status, &body);
+            cache_submit_result(work_id, nonce, status, &body);
             respond_json(request, tiny_http::StatusCode(status), body);
             return;
         }
@@ -611,7 +616,7 @@ pub fn handle_submit_work(
                     reason,
                     detail
                 );
-                cache_submit_result(work_id, status, &body);
+                cache_submit_result(work_id, nonce, status, &body);
                 respond_json(request, tiny_http::StatusCode(status), body);
                 return;
             }
@@ -626,7 +631,7 @@ pub fn handle_submit_work(
             started.elapsed().as_millis()
         );
     }
-    cache_submit_result(work_id, 200, &body);
+    cache_submit_result(work_id, nonce, 200, &body);
 
     respond_json(request, tiny_http::StatusCode(200), body);
 }
@@ -635,7 +640,8 @@ pub fn handle_submit_work(
 mod tests {
     use super::{
         build_mined_block_from_work_nonce, canonical_submit_reason, parse_submit_payload,
-        submit_http_status, submit_reason_message, submit_reject_body, work_id_is_valid,
+        submit_cache_key, submit_http_status, submit_reason_message, submit_reject_body,
+        work_id_is_valid,
     };
     use duta_core::types::H32;
     use serde_json::json;
@@ -678,6 +684,12 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
         assert_eq!(nonce, 42);
+    }
+
+    #[test]
+    fn submit_cache_key_is_nonce_scoped() {
+        let work_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_ne!(submit_cache_key(work_id, 1), submit_cache_key(work_id, 2));
     }
 
     #[test]
