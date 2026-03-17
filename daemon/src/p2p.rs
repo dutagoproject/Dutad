@@ -1959,6 +1959,11 @@ fn reorg_overlap_from(tip_h: u64) -> usize {
     tip_h.saturating_sub(overlap) as usize
 }
 
+fn deeper_overlap_from(window_start_h: u64) -> usize {
+    let step = (MAX_BLOCKS_PER_MSG / 2) as u64;
+    window_start_h.saturating_sub(step) as usize
+}
+
 fn should_accept_reorg_candidate(current_tip_cw: u64, incoming_cw: u64) -> bool {
     incoming_cw > current_tip_cw
 }
@@ -2498,10 +2503,42 @@ fn handle_peer(
                                 fork_point = Some(fp_h);
                             } else {
                                 // Window doesn't include anything after the common ancestor.
+                                if should_resync(
+                                    &peer,
+                                    launch_guard_resync_interval(network, &peer),
+                                ) {
+                                    let from = deeper_overlap_from(first0.height);
+                                    let limit = MAX_BLOCKS_PER_MSG;
+                                    let _ =
+                                        send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                    note_peer_resync(&peer, false, true);
+                                    dlog!(
+                                        "p2p: resync_request peer={} from={} limit={} reason=common_ancestor_window_exhausted first_height={} fork_point={}",
+                                        peer,
+                                        from,
+                                        limit,
+                                        first0.height,
+                                        fp_h
+                                    );
+                                }
                                 continue;
                             }
                         } else {
-                            // No common ancestor in this window; wait for a larger overlap.
+                            // No common ancestor in this window; ask for an older overlap
+                            // instead of stalling on the same slice forever.
+                            if should_resync(&peer, launch_guard_resync_interval(network, &peer)) {
+                                let from = deeper_overlap_from(first0.height);
+                                let limit = MAX_BLOCKS_PER_MSG;
+                                let _ = send_msg(&mut stream, &Msg::GetBlocksFrom { from, limit });
+                                note_peer_resync(&peer, false, true);
+                                dlog!(
+                                    "p2p: resync_request peer={} from={} limit={} reason=no_common_ancestor first_height={}",
+                                    peer,
+                                    from,
+                                    limit,
+                                    first0.height
+                                );
+                            }
                             continue;
                         }
                     }
@@ -3404,9 +3441,10 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 mod tests {
     use super::{
         ban_peer_manual, canonicalize_peer_token, is_transient_dial_error,
-        health_priority_sync_from, launch_guard_local_submit_ready, launch_guard_mining_ready,
-        list_banned_json, normalize_bootstrap_candidates, official_tip_sync_from, parse_peers_text,
-        read_line_limited, reorg_overlap_from, should_accept_reorg_candidate,
+        deeper_overlap_from, health_priority_sync_from, launch_guard_local_submit_ready,
+        launch_guard_mining_ready, list_banned_json, normalize_bootstrap_candidates,
+        official_tip_sync_from, parse_peers_text, read_line_limited, reorg_overlap_from,
+        should_accept_reorg_candidate,
         should_prefer_backbone_tie_candidate, subnet24_key, unban_peer_manual,
         validate_block_basic, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
@@ -3546,6 +3584,15 @@ mod tests {
         );
         assert_eq!(reorg_overlap_from(128), 64);
         assert_eq!(reorg_overlap_from(500), 500usize - (MAX_BLOCKS_PER_MSG / 2));
+    }
+
+    #[test]
+    fn deeper_overlap_steps_back_by_half_window() {
+        assert_eq!(deeper_overlap_from(0), 0);
+        assert_eq!(deeper_overlap_from(22), 0);
+        assert_eq!(deeper_overlap_from(64), 0);
+        assert_eq!(deeper_overlap_from(128), 64);
+        assert_eq!(deeper_overlap_from(200), 136);
     }
 
     #[test]
