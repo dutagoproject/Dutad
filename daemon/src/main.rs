@@ -59,7 +59,7 @@ fn console_line(tag: &str, color: &str, value: impl AsRef<str>) {
     after_help = "Examples:\n  dutad --daemon\n  dutad status\n  dutad stop\n  duta-cli getpeerinfo\n  duta-cli listbanned\n  duta-cli banpeer 203.0.113.10 launch_abuse\n  duta-cli unbanpeer 203.0.113.10\n  dutad --testnet --daemon"
 )]
 struct Args {
-    /// Data directory (default: ~/.duta/<network>). Overrides config datadir=.
+    /// Data directory (default mainnet: ~/.duta, testnet: ~/.duta/testnet, stagenet: ~/.duta/stagenet). Overrides config datadir=.
     #[arg(long)]
     datadir: Option<String>,
 
