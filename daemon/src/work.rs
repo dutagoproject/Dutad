@@ -21,6 +21,7 @@ pub(crate) struct WorkItem {
     pub bits: u64,
     pub chainwork: u64,
     pub miner: String,
+    pub work_scope: String,
     pub txs_obj: serde_json::Value,
     pub header: [u8; 80],
     pub anchor_hash32: String,
@@ -102,14 +103,19 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
 
     if let Some(old_ids) = mp.get("txids").and_then(|x| x.as_array()) {
         for item in old_ids {
-            let Some(old_key) = item.as_str() else { continue };
-            let Some(txv) = txs_obj.get(old_key) else { continue };
+            let Some(old_key) = item.as_str() else {
+                continue;
+            };
+            let Some(txv) = txs_obj.get(old_key) else {
+                continue;
+            };
             let mut tx_for_id = txv.clone();
             if let Some(obj) = tx_for_id.as_object_mut() {
                 obj.remove("fee");
                 obj.remove("size");
             }
-            let new_key = crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.to_string());
+            let new_key =
+                crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.to_string());
             if new_key != old_key {
                 changed = true;
             }
@@ -138,7 +144,8 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
 
     if changed {
         mp["txs"] = serde_json::Value::Object(new_txs);
-        mp["txids"] = serde_json::Value::Array(ordered.into_iter().map(serde_json::Value::String).collect());
+        mp["txids"] =
+            serde_json::Value::Array(ordered.into_iter().map(serde_json::Value::String).collect());
         Some(mp)
     } else {
         None
@@ -238,10 +245,15 @@ pub(crate) fn build_work_template(
     data_dir: &str,
     miner: &str,
     official_pool_bypass: bool,
+    work_scope: &str,
 ) -> Result<serde_json::Value, String> {
     let miner = miner.trim();
     if miner.is_empty() {
         return Err("missing_address".to_string());
+    }
+    let work_scope = work_scope.trim();
+    if work_scope.is_empty() {
+        return Err("missing_work_scope".to_string());
     }
     let net = net_from_datadir(data_dir);
     if !mining_address_is_valid_for_network(net, miner) {
@@ -320,7 +332,10 @@ pub(crate) fn build_work_template(
             }
         }
         obj.insert(coinbase_txid.clone(), coinbase_tx.clone());
-        obj.insert("__order".to_string(), serde_json::Value::Array(txids.clone()));
+        obj.insert(
+            "__order".to_string(),
+            serde_json::Value::Array(txids.clone()),
+        );
     }
 
     let ordered_txids: Vec<String> = txids
@@ -361,6 +376,7 @@ pub(crate) fn build_work_template(
         bits,
         chainwork,
         miner: miner.to_string(),
+        work_scope: work_scope.to_string(),
         txs_obj: txs_obj.clone(),
         header,
         anchor_hash32: anchor_hash32.to_hex(),
@@ -374,8 +390,8 @@ pub(crate) fn build_work_template(
         if map.len() >= MAX_OUTSTANDING_WORK_TOTAL {
             return Err("busy".to_string());
         }
-        let per_miner = map.values().filter(|v| v.miner == miner).count();
-        if per_miner >= MAX_OUTSTANDING_WORK_PER_MINER {
+        let per_scope = map.values().filter(|v| v.work_scope == work_scope).count();
+        if per_scope >= MAX_OUTSTANDING_WORK_PER_MINER {
             return Err("too_many_outstanding_work".to_string());
         }
         map.insert(work_id.clone(), item);
@@ -438,6 +454,28 @@ fn request_is_official_pool_work(request: &tiny_http::Request) -> bool {
         .unwrap_or(false)
 }
 
+fn official_work_scope(miner: &str, worker: &str) -> String {
+    let worker = worker.trim();
+    if worker.is_empty() {
+        return miner.to_string();
+    }
+    format!("{}#{}", miner, worker)
+}
+
+fn request_work_scope(request: &tiny_http::Request, miner: &str, official_pool_bypass: bool) -> String {
+    if official_pool_bypass {
+        if let Some(worker) = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("X-DUTA-Worker"))
+            .map(|h| h.value.as_str())
+        {
+            return official_work_scope(miner, worker);
+        }
+    }
+    miner.to_string()
+}
+
 pub fn handle_work(
     request: tiny_http::Request,
     data_dir: &str,
@@ -460,7 +498,8 @@ pub fn handle_work(
     };
 
     let official_pool_bypass = request_is_official_pool_work(&request);
-    let tpl = match build_work_template(data_dir, &miner, official_pool_bypass) {
+    let work_scope = request_work_scope(&request, &miner, official_pool_bypass);
+    let tpl = match build_work_template(data_dir, &miner, official_pool_bypass, &work_scope) {
         Ok(v) => v,
         Err(e) if e == "missing_address" => json!({"ok":false,"error":"missing_address"}),
         Err(e) if e == "invalid_address" => json!({"ok":false,"error":"invalid_address"}),
@@ -582,7 +621,10 @@ pub(crate) fn insert_test_work(work_id: &str, item: WorkItem) {
 
 #[cfg(test)]
 mod tests {
-    use super::{mining_address_is_valid, mining_address_is_valid_for_network, net_from_datadir};
+    use super::{
+        mining_address_is_valid, mining_address_is_valid_for_network, net_from_datadir,
+        official_work_scope,
+    };
     use crate::store;
     use duta_core::netparams::{self, Network};
 
@@ -611,7 +653,9 @@ mod tests {
         assert!(mining_address_is_valid(
             "stg1111111111111111111111111111111111111111"
         ));
-        assert!(!mining_address_is_valid("btc1111111111111111111111111111111111111111"));
+        assert!(!mining_address_is_valid(
+            "btc1111111111111111111111111111111111111111"
+        ));
     }
 
     #[test]
@@ -637,9 +681,22 @@ mod tests {
         std::fs::create_dir_all(&p).unwrap();
         let data_dir = p.to_string_lossy().to_string();
         store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
-        let err =
-            super::build_work_template(&data_dir, netparams::DEVFEE_ADDRS_TESTNET[0], false)
-                .unwrap_err();
+        let err = super::build_work_template(
+            &data_dir,
+            netparams::DEVFEE_ADDRS_TESTNET[0],
+            false,
+            netparams::DEVFEE_ADDRS_TESTNET[0],
+        )
+        .unwrap_err();
         assert_eq!(err, "miner_address_conflicts_with_devfee");
+    }
+
+    #[test]
+    fn official_work_scope_uses_worker_identity() {
+        assert_eq!(
+            official_work_scope("dut1wallet", "rig-a"),
+            "dut1wallet#rig-a"
+        );
+        assert_eq!(official_work_scope("dut1wallet", "   "), "dut1wallet");
     }
 }

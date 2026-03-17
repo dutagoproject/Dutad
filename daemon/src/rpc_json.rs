@@ -1,5 +1,5 @@
-use duta_core::types::H32;
 use duta_core::netparams::{genesis_hash, pow_start_bits, Network};
+use duta_core::types::H32;
 use serde_json::json;
 use std::fs;
 use std::sync::OnceLock;
@@ -447,7 +447,7 @@ fn getblocktemplate_json(
         return Err("invalid_miner_address".to_string());
     }
 
-    let work = crate::work::build_work_template(data_dir, miner, false)?;
+    let work = crate::work::build_work_template(data_dir, miner, false, miner)?;
     let bits_internal = work.get("bits").and_then(|x| x.as_u64()).unwrap_or(0);
     let bits_compact = compact_hex_from_leading_zero_bits(bits_internal);
     let target_hex = target_hex_from_leading_zero_bits(bits_internal);
@@ -1507,5 +1507,4 @@ mod tests {
             Some(true)
         );
     }
-
 }

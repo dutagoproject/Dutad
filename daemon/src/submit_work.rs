@@ -291,14 +291,19 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
 
     if let Some(old_ids) = mp.get("txids").and_then(|x| x.as_array()) {
         for item in old_ids {
-            let Some(old_key) = item.as_str() else { continue };
-            let Some(txv) = txs_obj.get(old_key) else { continue };
+            let Some(old_key) = item.as_str() else {
+                continue;
+            };
+            let Some(txv) = txs_obj.get(old_key) else {
+                continue;
+            };
             let mut tx_for_id = txv.clone();
             if let Some(obj) = tx_for_id.as_object_mut() {
                 obj.remove("fee");
                 obj.remove("size");
             }
-            let new_key = crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.to_string());
+            let new_key =
+                crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.to_string());
             if new_key != old_key {
                 changed = true;
             }
@@ -327,7 +332,8 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
 
     if changed {
         mp["txs"] = serde_json::Value::Object(new_txs);
-        mp["txids"] = serde_json::Value::Array(ordered.into_iter().map(serde_json::Value::String).collect());
+        mp["txids"] =
+            serde_json::Value::Array(ordered.into_iter().map(serde_json::Value::String).collect());
         Some(mp)
     } else {
         None
@@ -592,27 +598,24 @@ pub fn handle_submit_work(
         }
     };
 
-    let accepted = match accept_mined_block_with_source(
-        data_dir,
-        &mined_block,
-        official_stratum_source,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            let detail = e.clone();
-            let reason = canonical_submit_reason(&detail);
-            let (status, body) = submit_reject_body(&detail);
-            edlog!(
-                "[dutad] BLOCK_REJECT work={} reason={} detail={}",
-                short_id(work_id),
-                reason,
-                detail
-            );
-            cache_submit_result(work_id, status, &body);
-            respond_json(request, tiny_http::StatusCode(status), body);
-            return;
-        }
-    };
+    let accepted =
+        match accept_mined_block_with_source(data_dir, &mined_block, official_stratum_source) {
+            Ok(v) => v,
+            Err(e) => {
+                let detail = e.clone();
+                let reason = canonical_submit_reason(&detail);
+                let (status, body) = submit_reject_body(&detail);
+                edlog!(
+                    "[dutad] BLOCK_REJECT work={} reason={} detail={}",
+                    short_id(work_id),
+                    reason,
+                    detail
+                );
+                cache_submit_result(work_id, status, &body);
+                respond_json(request, tiny_http::StatusCode(status), body);
+                return;
+            }
+        };
 
     let body = accepted.to_string();
 
@@ -728,6 +731,7 @@ mod tests {
                 bits: 32,
                 chainwork: 1,
                 miner: "miner".to_string(),
+                work_scope: "miner".to_string(),
                 txs_obj: json!({}),
                 header,
                 anchor_hash32: H32::zero().to_hex(),
