@@ -150,12 +150,9 @@ fn submit_reason_message(reason: &str) -> String {
             "Share rejected: work mismatch (chain tip changed). Please fetch new work.".to_string()
         }
         "sync_gate" => {
-            "Share rejected: node is waiting for backbone sync. Please retry after the node is aligned."
-                .to_string()
+            "Share rejected: waiting sync.".to_string()
         }
-        "syncing" => {
-            "Share rejected: node is syncing. Please retry after the node catches up.".to_string()
-        }
+        "syncing" => "Share rejected: waiting sync.".to_string(),
         "busy" => "Share rejected: node is busy. Please retry shortly.".to_string(),
         "low_difficulty" => "Share rejected: low difficulty (does not meet target).".to_string(),
         _ => "Share rejected: invalid share.".to_string(),
@@ -354,9 +351,19 @@ pub(crate) fn accept_mined_block(
 pub(crate) fn accept_mined_block_with_source(
     data_dir: &str,
     mined_block: &ChainBlock,
-    _official_stratum_source: bool,
+    _stratum_source: bool,
 ) -> Result<serde_json::Value, String> {
-    let _net = net_from_datadir(data_dir);
+    let net = net_from_datadir(data_dir);
+    let best_h = p2p::best_seen_height();
+    let max_lag = duta_core::netparams::max_local_mining_sync_lag_blocks(net);
+    let sync_gate_active =
+        mined_block.height <= duta_core::netparams::mining_sync_gate_until_height(net);
+    if sync_gate_active && best_h > mined_block.height.saturating_add(max_lag) {
+        return Err(format!(
+            "syncing block_height={} best_seen_height={}",
+            mined_block.height, best_h
+        ));
+    }
     store::note_accepted_block(data_dir, mined_block)?;
     p2p::note_local_tip_height(mined_block.height);
 
@@ -415,10 +422,10 @@ pub(crate) fn accept_mined_block_with_source(
     }))
 }
 
-fn submit_source_is_official_stratum(request: &tiny_http::Request) -> bool {
+fn submit_source_is_stratum(request: &tiny_http::Request) -> bool {
     request.headers().iter().any(|h| {
         h.field.equiv("X-DUTA-Work-Source")
-            && h.value.as_str().eq_ignore_ascii_case("official-stratum")
+            && h.value.as_str().to_ascii_lowercase().contains("stratum")
     })
 }
 
@@ -470,7 +477,7 @@ pub fn handle_submit_work(
     data_dir: &str,
     respond_json: fn(tiny_http::Request, tiny_http::StatusCode, String),
 ) {
-    let official_stratum_source = submit_source_is_official_stratum(&request);
+    let stratum_source = submit_source_is_stratum(&request);
     if request.method() != &tiny_http::Method::Post {
         wlog!("[dutad] SUBMIT_REJECT reason=method_not_allowed");
         crate::respond_error(request, tiny_http::StatusCode(405), "method_not_allowed");
@@ -596,7 +603,7 @@ pub fn handle_submit_work(
     };
 
     let accepted =
-        match accept_mined_block_with_source(data_dir, &mined_block, official_stratum_source) {
+                match accept_mined_block_with_source(data_dir, &mined_block, stratum_source) {
             Ok(v) => v,
             Err(e) => {
                 let detail = e.clone();

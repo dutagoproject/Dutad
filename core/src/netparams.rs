@@ -178,7 +178,7 @@ pub fn pow_bootstrap_sync_until_height(net: Network) -> u64 {
 
 pub fn pow_bootstrap_sync_target_bits(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 21,
+        Network::Mainnet => 22,
         Network::Testnet | Network::Stagenet => pow_start_bits(net),
     }
 }
@@ -192,8 +192,23 @@ pub fn pow_bootstrap_sync_recent_span(net: Network) -> u64 {
 
 pub fn pow_bootstrap_sync_enabled(net: Network, _next_height: u64, _current_bits: u64) -> bool {
     match net {
-        Network::Mainnet => false,
+        Network::Mainnet => _next_height <= pow_bootstrap_sync_until_height(net)
+            && _current_bits < pow_bootstrap_sync_target_bits(net),
         Network::Testnet | Network::Stagenet => false,
+    }
+}
+
+pub fn max_local_mining_sync_lag_blocks(net: Network) -> u64 {
+    match net {
+        Network::Mainnet => 20,
+        Network::Testnet | Network::Stagenet => 0,
+    }
+}
+
+pub fn mining_sync_gate_until_height(net: Network) -> u64 {
+    match net {
+        Network::Mainnet => 1000,
+        Network::Testnet | Network::Stagenet => 0,
     }
 }
 
@@ -203,9 +218,7 @@ pub fn pow_launch_difficulty_hardening_enabled(
     current_bits: u64,
 ) -> bool {
     match net {
-        // Difficulty-side hardening is disabled; bootstrap safety now relies on
-        // backbone-first sync and mining readiness instead of asymmetric retargets.
-        Network::Mainnet => false && pow_bootstrap_sync_enabled(net, next_height, current_bits),
+        Network::Mainnet => pow_bootstrap_sync_enabled(net, next_height, current_bits),
         Network::Testnet | Network::Stagenet => false,
     }
 }

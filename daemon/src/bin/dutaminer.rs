@@ -90,6 +90,36 @@ struct WorkResp {
 
 static WORK_REJECT_LOG_STATE: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
 const WORK_REJECT_LOG_INTERVAL_SECS: u64 = 15;
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_RED: &str = "\x1b[97;41m";
+const ANSI_GREEN: &str = "\x1b[30;42m";
+const ANSI_YELLOW: &str = "\x1b[30;43m";
+const ANSI_BLUE: &str = "\x1b[97;44m";
+const ANSI_CYAN: &str = "\x1b[30;46m";
+
+fn paint(tag: &str, color: &str) -> String {
+    format!("{color}{tag}{ANSI_RESET}")
+}
+
+fn info_tag() -> String {
+    paint("INFO", ANSI_BLUE)
+}
+
+fn work_tag() -> String {
+    paint("WORK", ANSI_GREEN)
+}
+
+fn wait_tag() -> String {
+    paint("WAIT", ANSI_YELLOW)
+}
+
+fn ok_tag() -> String {
+    paint("OK", ANSI_CYAN)
+}
+
+fn err_tag() -> String {
+    paint("ERR", ANSI_RED)
+}
 
 fn work_reject_log_state() -> &'static Mutex<Option<(String, Instant)>> {
     WORK_REJECT_LOG_STATE.get_or_init(|| Mutex::new(None))
@@ -100,7 +130,7 @@ fn log_work_reject_once(message: &str) {
     let mut state = match work_reject_log_state().lock() {
         Ok(g) => g,
         Err(_) => {
-            eprintln!("{message}");
+            eprintln!("{} {}", wait_tag(), message);
             return;
         }
     };
@@ -114,7 +144,7 @@ fn log_work_reject_once(message: &str) {
         }
         _ => {
             *state = Some((message.to_string(), now));
-            eprintln!("{message}");
+            eprintln!("{} {}", wait_tag(), message);
         }
     }
 }
@@ -123,12 +153,33 @@ const MIN_POLL_MS: u64 = 50;
 const SYNC_BACKOFF_MS: u64 = 2_000;
 const BUSY_BACKOFF_MS: u64 = 1_000;
 const RPC_TIMEOUT_SECS: u64 = 5;
+const MIN_LOCAL_WORK_TTL_SECS: u64 = 10;
+const MIN_LOCAL_WORK_TTL_HIGH_BITS_SECS: u64 = 60;
 
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_secs()
+}
+
+fn min_local_work_ttl_secs(bits: u32) -> u64 {
+    if bits >= 20 {
+        MIN_LOCAL_WORK_TTL_HIGH_BITS_SECS
+    } else {
+        MIN_LOCAL_WORK_TTL_SECS
+    }
+}
+
+fn effective_work_expires_at(server_expires_at: u64, bits: u32) -> u64 {
+    let now = now_unix();
+    let ttl = server_expires_at.saturating_sub(now);
+    let min_ttl = min_local_work_ttl_secs(bits);
+    if ttl >= min_ttl {
+        server_expires_at
+    } else {
+        now.saturating_add(min_ttl)
+    }
 }
 
 fn leading_zero_bits(h: &H32) -> u32 {
@@ -387,9 +438,9 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
             let h = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
             let hash = v.get("hash32").and_then(|x| x.as_str()).unwrap_or("");
             if !hash.is_empty() {
-                println!("ACCEPTED block: height={} hash={}", h, hash);
+                println!("{} accepted block: height={} hash={}", ok_tag(), h, hash);
             } else {
-                println!("ACCEPTED share: height={}", h);
+                println!("{} accepted share: height={}", ok_tag(), h);
             }
             return;
         }
@@ -410,6 +461,10 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 );
                 return;
             }
+            if reason == "stale" || v.get("reject_reason").and_then(|x| x.as_str()) == Some("stale") {
+                println!("REJECTED share: Share rejected: stale share (submitted too late)");
+                return;
+            }
             println!("REJECTED share: {} hash={}", msg, mined_hash32);
             println!("reason={}", reason);
             println!("raw={}", body);
@@ -421,7 +476,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
     if code == 200 && v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
         let h = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
         let hash = v.get("hash32").and_then(|x| x.as_str()).unwrap_or("");
-        println!("ACCEPTED block: height={} hash={}", h, hash);
+        println!("{} accepted block: height={} hash={}", ok_tag(), h, hash);
         return;
     }
 
@@ -433,9 +488,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
 
     match err {
         "stale_work" => {
-            println!("REJECTED share: Share rejected: stale share (submitted too late). Please fetch new work and try again. hash={}", mined_hash32);
-            println!("reason=stale");
-            println!("raw={}", body);
+            println!("REJECTED share: Share rejected: stale share (submitted too late)");
         }
         "pow_invalid" => {
             println!(
@@ -452,8 +505,7 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                     mined_hash32
                 );
             } else if detail.contains("stale_or_out_of_order_block") {
-                println!("REJECTED share: Share rejected: stale share (submitted too late). Please fetch new work and try again. hash={}", mined_hash32);
-                println!("reason=stale");
+                println!("REJECTED share: Share rejected: stale share (submitted too late)");
             } else if detail.contains("bad_prevhash") || detail.contains("bits_invalid") {
                 println!("REJECTED share: Share rejected: work mismatch (chain tip changed). Please fetch new work. hash={}", mined_hash32);
                 println!("reason=work_mismatch");
@@ -617,7 +669,8 @@ fn main() -> Result<(), String> {
 
     let mut rpc = args.rpc.trim_end_matches('/').to_string();
     println!(
-        "dutaminer: rpc={} address={} threads={} poll_ms={}",
+        "{} dutaminer: rpc={} address={} threads={} poll_ms={}",
+        info_tag(),
         rpc, args.address, args.threads, poll_ms
     );
 
@@ -690,12 +743,14 @@ fn main() -> Result<(), String> {
             }
         };
 
-        let ttl = w.expires_at.saturating_sub(now_unix());
+        let effective_expires_at = effective_work_expires_at(w.expires_at, w.bits);
+        let ttl = effective_expires_at.saturating_sub(now_unix());
         {
             let diff = expected_hashes(w.bits).unwrap_or(0);
             let diff_s = format_hash_units(diff);
             println!(
-                "work: height={} bits={} difficulty={} epoch={} mem_mb={} ttl={}s work_id={}",
+                "{} height={} bits={} difficulty={} epoch={} mem_mb={} ttl={}s work_id={}",
+                work_tag(),
                 w.height, w.bits, diff_s, w.epoch, w.mem_mb, ttl, w.work_id
             );
         }
@@ -705,7 +760,7 @@ fn main() -> Result<(), String> {
             let ds = dutahash::build_dataset_for_epoch(w.epoch, anchor, w.mem_mb);
             cached_dataset = Arc::new(ds);
             cache_key = Some(key);
-            println!("dataset built: epoch={} mem_mb={}", w.epoch, w.mem_mb);
+            println!("{} dataset built: epoch={} mem_mb={}", info_tag(), w.epoch, w.mem_mb);
         }
 
         // Assemble canonical header bytes used by daemon's remote-mining implementation:
@@ -727,7 +782,7 @@ fn main() -> Result<(), String> {
         let found_nonce: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let dataset = cached_dataset.clone();
         let threads = args.threads;
-        let expires_at = w.expires_at;
+        let expires_at = effective_expires_at;
         let bits = w.bits;
 
         let mut handles = Vec::with_capacity(threads);
@@ -767,7 +822,9 @@ fn main() -> Result<(), String> {
             None => {
                 let ttl = w.expires_at.saturating_sub(now_unix());
                 eprintln!(
-                    "work window ended before a valid block was found (bits={}, ttl={}); requesting fresh work...",
+                    "{} still mining height={} (bits={}, time_left={}); checking for a new job...",
+                    wait_tag(),
+                    w.height,
                     w.bits,
                     fmt_secs(ttl)
                 );
@@ -785,7 +842,8 @@ fn main() -> Result<(), String> {
         let mined_hash32 = mined_digest.to_hex();
 
         println!(
-            "hashrate: {} (hashes={} elapsed={:.2}s)",
+            "{} hashrate: {} (hashes={} elapsed={:.2}s)",
+            info_tag(),
             hs_str, total_hashes as u64, elapsed
         );
         last_hs = hs;
@@ -799,7 +857,8 @@ fn main() -> Result<(), String> {
                     let miners = v.get("miners").and_then(|x| x.as_u64()).unwrap_or(0);
                     let total_hs = v.get("total_hs").and_then(|x| x.as_f64()).unwrap_or(0.0);
                     println!(
-                        "wallet_total_hashrate: {} (miners={})",
+                        "{} wallet total hashrate: {} (miners={})",
+                        info_tag(),
                         format_hashrate(total_hs),
                         miners
                     );
@@ -810,10 +869,10 @@ fn main() -> Result<(), String> {
         let body = json!({"work_id": w.work_id, "nonce": nonce}).to_string();
         match http_post_json(&rpc, "/submit_work", &body) {
             Ok((resp_body, resp_code)) => {
-                println!("submit: nonce={} work_id={}", nonce, w.work_id);
+                println!("{} submit: nonce={} work_id={}", info_tag(), nonce, w.work_id);
                 explain_submit_result(resp_code, &resp_body, &mined_hash32);
             }
-            Err(e) => eprintln!("submit error: {e}"),
+            Err(e) => eprintln!("{} submit error: {e}", err_tag()),
         }
 
         thread::sleep(Duration::from_millis(20));

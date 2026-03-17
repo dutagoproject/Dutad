@@ -320,9 +320,18 @@ fn expected_bits_for_next_height(
                         let target = pow_target_secs(net).saturating_mul(span);
 
                         // Only bump early if blocks are coming in much too fast.
-                        // This is intentionally softer than the old bootstrap sync gate and auto-turns off.
+                        // Push harder toward the bootstrap target bits so solo rushes do not keep
+                        // the chain unrealistically easy while nodes are still converging.
                         if actual > 0 && target > 0 && actual < (target / 3).max(1) {
-                            bits = adjust_bits_capped(bits, actual, target, min_bits, max_bits, 1, 0);
+                            bits = adjust_bits_capped(
+                                bits,
+                                actual,
+                                target,
+                                min_bits,
+                                netparams::pow_bootstrap_sync_target_bits(net).min(max_bits),
+                                2,
+                                0,
+                            );
                         }
                     }
                 }

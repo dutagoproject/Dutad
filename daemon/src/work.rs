@@ -244,7 +244,7 @@ fn compact_hex_from_leading_zero_bits(bits: u64) -> String {
 pub(crate) fn build_work_template(
     data_dir: &str,
     miner: &str,
-    _official_pool_bypass: bool,
+    _stratum_pool_request: bool,
     work_scope: &str,
 ) -> Result<serde_json::Value, String> {
     let miner = miner.trim();
@@ -274,13 +274,16 @@ pub(crate) fn build_work_template(
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
 
     let best_h = p2p::best_seen_height();
-    if best_h > tip_h.saturating_add(1) {
+    let max_lag = netparams::max_local_mining_sync_lag_blocks(net);
+    let next_height = tip_h.saturating_add(1);
+    let sync_gate_active = next_height <= netparams::mining_sync_gate_until_height(net);
+    if sync_gate_active && best_h > tip_h.saturating_add(max_lag) {
         return Err(format!(
             "syncing tip_height={} best_seen_height={}",
             tip_h, best_h
         ));
     }
-    let height = tip_h + 1;
+    let height = next_height;
     let prevhash32 = tip_hash32;
     let bits = store::expected_bits_next(data_dir)?;
     let chainwork =
@@ -433,10 +436,10 @@ pub(crate) fn build_work_template(
     }))
 }
 
-fn request_is_official_pool_work(request: &tiny_http::Request) -> bool {
+fn request_is_stratum_pool_work(request: &tiny_http::Request) -> bool {
     let source_ok = request.headers().iter().any(|h| {
         h.field.equiv("X-DUTA-Work-Source")
-            && h.value.as_str().eq_ignore_ascii_case("official-stratum")
+            && h.value.as_str().to_ascii_lowercase().contains("stratum")
     });
     if !source_ok {
         return false;
@@ -450,7 +453,7 @@ fn request_is_official_pool_work(request: &tiny_http::Request) -> bool {
         .unwrap_or(false)
 }
 
-fn official_work_scope(miner: &str, worker: &str) -> String {
+fn stratum_work_scope(miner: &str, worker: &str) -> String {
     let worker = worker.trim();
     if worker.is_empty() {
         return miner.to_string();
@@ -458,15 +461,15 @@ fn official_work_scope(miner: &str, worker: &str) -> String {
     format!("{}#{}", miner, worker)
 }
 
-fn request_work_scope(request: &tiny_http::Request, miner: &str, official_pool_bypass: bool) -> String {
-    if official_pool_bypass {
+fn request_work_scope(request: &tiny_http::Request, miner: &str, stratum_pool_bypass: bool) -> String {
+    if stratum_pool_bypass {
         if let Some(worker) = request
             .headers()
             .iter()
             .find(|h| h.field.equiv("X-DUTA-Worker"))
             .map(|h| h.value.as_str())
         {
-            return official_work_scope(miner, worker);
+            return stratum_work_scope(miner, worker);
         }
     }
     miner.to_string()
@@ -493,9 +496,9 @@ pub fn handle_work(
         miner_p
     };
 
-    let official_pool_bypass = request_is_official_pool_work(&request);
-    let work_scope = request_work_scope(&request, &miner, official_pool_bypass);
-    let tpl = match build_work_template(data_dir, &miner, official_pool_bypass, &work_scope) {
+    let stratum_pool_bypass = request_is_stratum_pool_work(&request);
+    let work_scope = request_work_scope(&request, &miner, stratum_pool_bypass);
+    let tpl = match build_work_template(data_dir, &miner, stratum_pool_bypass, &work_scope) {
         Ok(v) => v,
         Err(e) if e == "missing_address" => json!({"ok":false,"error":"missing_address"}),
         Err(e) if e == "invalid_address" => json!({"ok":false,"error":"invalid_address"}),
@@ -605,7 +608,7 @@ pub(crate) fn insert_test_work(work_id: &str, item: WorkItem) {
 mod tests {
     use super::{
         mining_address_is_valid, mining_address_is_valid_for_network, net_from_datadir,
-        official_work_scope,
+        stratum_work_scope,
     };
     use crate::store;
     use duta_core::netparams::{self, Network};
@@ -674,11 +677,11 @@ mod tests {
     }
 
     #[test]
-    fn official_work_scope_uses_worker_identity() {
+    fn stratum_work_scope_uses_worker_identity() {
         assert_eq!(
-            official_work_scope("dut1wallet", "rig-a"),
+            stratum_work_scope("dut1wallet", "rig-a"),
             "dut1wallet#rig-a"
         );
-        assert_eq!(official_work_scope("dut1wallet", "   "), "dut1wallet");
+        assert_eq!(stratum_work_scope("dut1wallet", "   "), "dut1wallet");
     }
 }
