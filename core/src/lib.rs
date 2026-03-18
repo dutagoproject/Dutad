@@ -8,6 +8,7 @@
 //!   used by daemon/miner/wallet today.
 
 pub mod address;
+pub mod amount;
 pub mod dutahash;
 pub mod hash;
 pub mod netparams;
@@ -18,6 +19,12 @@ pub mod types;
 pub use address::{
     address_prefix, detect_network, parse_address, parse_address_for_network, pkh_from_hex,
     pkh_from_pubkey, pkh_to_address, pkh_to_address_for_network, pkh_to_hex, ADDR_PREFIX,
+};
+pub use amount::{
+    format_dut_i64, format_dut_u64, parse_duta_to_dut_i64, AmountUnits, AMOUNT_UNITS, BASE_UNIT,
+    DEFAULT_DUST_CHANGE_DUT, DEFAULT_MAX_WALLET_FEE_DUT, DEFAULT_MIN_OUTPUT_VALUE_DUT,
+    DEFAULT_MIN_RELAY_FEE_PER_KB_DUT, DEFAULT_WALLET_FEE_DUT, DISPLAY_UNIT, DUT_PER_DUTA,
+    DUT_PER_DUTA_I64, DUTA_DECIMALS,
 };
 pub use netparams::{dev_fee_address, devfee_addrs, devfee_bps, Conf, Network};
 pub use types::H32;

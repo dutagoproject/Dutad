@@ -1,6 +1,7 @@
 use crate::canon_json;
 use crate::ChainBlock;
 use duta_core::address;
+use duta_core::amount::DUT_PER_DUTA;
 use duta_core::dutahash;
 use duta_core::hash;
 use duta_core::netparams;
@@ -29,7 +30,7 @@ pub const MAX_FUTURE_DRIFT_SECS: u64 = 2 * 60 * 60;
 pub const COINBASE_MATURITY: u64 = 60;
 
 fn block_subsidy(height: u64) -> u64 {
-    const INITIAL_BLOCK_REWARD: u64 = 50;
+    const INITIAL_BLOCK_REWARD: u64 = 50 * DUT_PER_DUTA;
     const HALVING_INTERVAL: u64 = 210_000;
     const MAX_HALVINGS: u64 = 64;
 
@@ -1760,6 +1761,7 @@ pub fn utxo_get(data_dir: &str, txid: &str, vout: u64) -> Option<(u64, u64, bool
 #[cfg(test)]
 mod tests_a5 {
     use super::*;
+    use duta_core::amount::DUT_PER_DUTA;
     use serde_json::json;
     fn tmp_tree(name: &str) -> sled::Tree {
         let db = sled::Config::new().temporary(true).open().unwrap();
@@ -1835,8 +1837,8 @@ mod tests_a5 {
             json!({
                 "vin": [],
                 "vout": [
-                    {"addr":"dut34eb9f0d0d9e0ec7fbf78e6bfc7277f10f01aaf9","value": 5},
-                    {"addr":"dut34eb9f0d0d9e0ec7fbf78e6bfc7277f10f01aaf8","value": 21}
+                    {"addr":"dut34eb9f0d0d9e0ec7fbf78e6bfc7277f10f01aaf9","value": 2_500_000_000u64},
+                    {"addr":"dut34eb9f0d0d9e0ec7fbf78e6bfc7277f10f01aaf8","value": 1u64}
                 ]
             }),
         )];
@@ -1854,6 +1856,12 @@ mod tests_a5 {
         )];
         let err = validate_utxo_invariants_for_block(&utxo, 10, &txs).unwrap_err();
         assert!(err.contains("fee_negative"));
+    }
+
+    #[test]
+    fn a5_block_subsidy_uses_base_unit_scaling() {
+        assert_eq!(block_subsidy(0), 50 * DUT_PER_DUTA);
+        assert_eq!(block_subsidy(210_000), 25 * DUT_PER_DUTA);
     }
 
     #[test]

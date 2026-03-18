@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::canon_json;
 use crate::store;
+use duta_core::amount::{DEFAULT_MIN_OUTPUT_VALUE_DUT, DEFAULT_MIN_RELAY_FEE_PER_KB_DUT};
 use duta_core::address;
 use duta_core::hash;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -15,11 +16,11 @@ const COINBASE_MATURITY: u64 = 60;
 const MAX_TX_BYTES: usize = 100_000;
 const MAX_MEMPOOL_TXS: usize = 10_000;
 const MAX_MEMPOOL_BYTES: usize = 5_000_000; // 5MB
-const MIN_RELAY_FEE_PER_KB: u64 = 1;
+const MIN_RELAY_FEE_PER_KB: u64 = DEFAULT_MIN_RELAY_FEE_PER_KB_DUT;
 
 // Gate C (phase 1): anti-UTXO-bloat policy.
 // Reject outputs below this value and cap outputs per tx.
-const MIN_OUTPUT_VALUE: u64 = 1;
+const MIN_OUTPUT_VALUE: u64 = DEFAULT_MIN_OUTPUT_VALUE_DUT;
 
 // Gate C: orphan tx policy (P2P-only, phase 1)
 const ORPHAN_MAX_TXS: usize = 256;
@@ -353,18 +354,29 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     let mut changed = false;
     let mut new_txs = serde_json::Map::new();
     let mut ordered: Vec<String> = Vec::new();
+    let original_ids: Vec<String> = mp
+        .get("txids")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
 
     if let Some(old_ids) = mp.get("txids").and_then(|x| x.as_array()) {
         for item in old_ids {
             let Some(old_key) = item.as_str() else {
+                changed = true;
                 continue;
             };
             let Some(txv) = txs_obj.get(old_key) else {
+                changed = true;
                 continue;
             };
             let mut tx_for_id = txv.clone();
             if let Some(obj) = tx_for_id.as_object_mut() {
-                obj.remove("fee");
                 obj.remove("size");
             }
             let new_key = txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.to_string());
@@ -381,7 +393,6 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     for (old_key, txv) in txs_obj.iter() {
         let mut tx_for_id = txv.clone();
         if let Some(obj) = tx_for_id.as_object_mut() {
-            obj.remove("fee");
             obj.remove("size");
         }
         let new_key = txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.clone());
@@ -392,6 +403,15 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
             new_txs.insert(new_key.clone(), txv.clone());
             ordered.push(new_key);
         }
+    }
+
+    if original_ids.len() != ordered.len()
+        || original_ids
+            .iter()
+            .zip(ordered.iter())
+            .any(|(left, right)| left != right)
+    {
+        changed = true;
     }
 
     if changed {
@@ -852,7 +872,8 @@ pub fn handle_submit_tx(
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_mempool_caps, parse_submit_tx_request, rebuild_mempool_txids, txid_is_valid,
+        enforce_mempool_caps, parse_submit_tx_request, rebuild_mempool_txids,
+        sanitize_mempool_value, txid_from_value, txid_is_valid,
     };
     use serde_json::json;
 
@@ -941,5 +962,50 @@ mod tests {
             let key = txid.as_str().expect("txid string");
             assert!(mp["txs"].get(key).is_some());
         }
+    }
+
+    #[test]
+    fn sanitize_mempool_value_keeps_fee_in_txid_identity() {
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}],
+            "fee": 10000,
+            "size": 321
+        });
+        let mut tx_for_id = tx.clone();
+        tx_for_id.as_object_mut().expect("tx object").remove("size");
+        let canonical = txid_from_value(&tx_for_id).expect("canonical txid");
+        let mp = json!({
+            "txids": [canonical.clone()],
+            "txs": {
+                canonical.clone(): tx
+            }
+        });
+
+        assert!(sanitize_mempool_value(&mp).is_none());
+    }
+
+    #[test]
+    fn sanitize_mempool_value_repairs_txid_index_when_array_is_stale() {
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}],
+            "fee": 10000,
+            "size": 321
+        });
+        let mut tx_for_id = tx.clone();
+        tx_for_id.as_object_mut().expect("tx object").remove("size");
+        let canonical = txid_from_value(&tx_for_id).expect("canonical txid");
+        let stale = "ff".repeat(32);
+        let mp = json!({
+            "txids": [stale],
+            "txs": {
+                canonical.clone(): tx
+            }
+        });
+
+        let repaired = sanitize_mempool_value(&mp).expect("stale txids should be repaired");
+        assert_eq!(repaired["txids"], json!([canonical.clone()]));
+        assert!(repaired["txs"].get(&canonical).is_some());
     }
 }

@@ -300,7 +300,6 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
             };
             let mut tx_for_id = txv.clone();
             if let Some(obj) = tx_for_id.as_object_mut() {
-                obj.remove("fee");
                 obj.remove("size");
             }
             let new_key =
@@ -318,7 +317,6 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     for (old_key, txv) in txs_obj.iter() {
         let mut tx_for_id = txv.clone();
         if let Some(obj) = tx_for_id.as_object_mut() {
-            obj.remove("fee");
             obj.remove("size");
         }
         let new_key = crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.clone());
@@ -639,8 +637,8 @@ pub fn handle_submit_work(
 mod tests {
     use super::{
         build_mined_block_from_work_nonce, canonical_submit_reason, parse_submit_payload,
-        submit_cache_key, submit_http_status, submit_reason_message, submit_reject_body,
-        work_id_is_valid,
+        sanitize_mempool_value, submit_cache_key, submit_http_status, submit_reason_message,
+        submit_reject_body, work_id_is_valid,
     };
     use duta_core::types::H32;
     use serde_json::json;
@@ -754,6 +752,29 @@ mod tests {
         let err = build_mined_block_from_work_nonce(work_id, 0, true).unwrap_err();
         assert_eq!(err, "pow_invalid");
         assert!(crate::work::peek_work(work_id).is_some());
+    }
+
+    #[test]
+    fn sanitize_mined_block_mempool_keeps_fee_in_txid_identity() {
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"test1dest","value":1000}],
+            "fee": 10000,
+            "size": 123,
+        });
+        let canonical = crate::store::txid_from_value(&json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"test1dest","value":1000}],
+            "fee": 10000,
+        }))
+        .expect("canonical txid");
+        let mp = json!({
+            "txids": [canonical.clone()],
+            "txs": {
+                canonical.clone(): tx
+            }
+        });
+        assert!(sanitize_mempool_value(&mp).is_none());
     }
 }
 

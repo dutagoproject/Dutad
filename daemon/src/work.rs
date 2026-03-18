@@ -1,6 +1,7 @@
 use crate::p2p;
 use crate::store;
 use duta_core::address;
+use duta_core::amount::DUT_PER_DUTA;
 use duta_core::dutahash;
 use duta_core::netparams::{self, Network};
 use duta_core::types::H32;
@@ -71,7 +72,7 @@ fn header80(
 }
 
 fn block_subsidy(height: u64) -> u64 {
-    const INITIAL_BLOCK_REWARD: u64 = 50;
+    const INITIAL_BLOCK_REWARD: u64 = 50 * DUT_PER_DUTA;
     const HALVING_INTERVAL: u64 = 210_000;
     const MAX_HALVINGS: u64 = 64;
     let halvings = height / HALVING_INTERVAL;
@@ -111,7 +112,6 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
             };
             let mut tx_for_id = txv.clone();
             if let Some(obj) = tx_for_id.as_object_mut() {
-                obj.remove("fee");
                 obj.remove("size");
             }
             let new_key =
@@ -129,7 +129,6 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     for (old_key, txv) in txs_obj.iter() {
         let mut tx_for_id = txv.clone();
         if let Some(obj) = tx_for_id.as_object_mut() {
-            obj.remove("fee");
             obj.remove("size");
         }
         let new_key = crate::store::txid_from_value(&tx_for_id).unwrap_or_else(|_| old_key.clone());
@@ -150,6 +149,14 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     } else {
         None
     }
+}
+
+fn template_tx_for_block(txv: &serde_json::Value) -> serde_json::Value {
+    let mut tx = txv.clone();
+    if let Some(obj) = tx.as_object_mut() {
+        obj.remove("size");
+    }
+    tx
 }
 
 fn write_mempool_value(data_dir: &str, v: &serde_json::Value) -> Result<(), String> {
@@ -434,10 +441,7 @@ pub(crate) fn build_work_template(
     let mut txs_obj = mp.get("txs").cloned().unwrap_or_else(|| json!({}));
     if let Some(obj) = txs_obj.as_object_mut() {
         for (_txid, txv) in obj.iter_mut() {
-            if let Some(txo) = txv.as_object_mut() {
-                txo.remove("fee");
-                txo.remove("size");
-            }
+            *txv = template_tx_for_block(txv);
         }
         obj.insert(coinbase_txid.clone(), coinbase_tx.clone());
         obj.insert(
@@ -716,11 +720,14 @@ pub(crate) fn insert_test_work(work_id: &str, item: WorkItem) {
 #[cfg(test)]
 mod tests {
     use super::{
-        mining_address_is_valid, mining_address_is_valid_for_network, net_from_datadir,
-        stratum_work_scope,
+        block_subsidy, mining_address_is_valid,
+        mining_address_is_valid_for_network, net_from_datadir, sanitize_mempool_value,
+        stratum_work_scope, template_tx_for_block,
     };
     use crate::store;
+    use duta_core::amount::DUT_PER_DUTA;
     use duta_core::netparams::{self, Network};
+    use serde_json::json;
 
     #[test]
     fn net_from_datadir_prefers_meta_over_path_name() {
@@ -792,5 +799,56 @@ mod tests {
             "dut1wallet#rig-a"
         );
         assert_eq!(stratum_work_scope("dut1wallet", "   "), "dut1wallet");
+    }
+
+    #[test]
+    fn work_template_subsidy_uses_base_unit_scaling() {
+        assert_eq!(block_subsidy(0), 50 * DUT_PER_DUTA);
+        assert_eq!(block_subsidy(210_000), 25 * DUT_PER_DUTA);
+    }
+
+    #[test]
+    fn sanitize_mempool_value_keeps_fee_in_txid_identity() {
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"test1dest","value":1000}],
+            "fee": 10000,
+            "size": 123,
+        });
+        let canonical = crate::store::txid_from_value(&json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"test1dest","value":1000}],
+            "fee": 10000,
+        }))
+        .expect("canonical txid");
+        let mp = json!({
+            "txids": [canonical.clone()],
+            "txs": {
+                canonical.clone(): tx
+            }
+        });
+        assert!(sanitize_mempool_value(&mp).is_none());
+    }
+
+    #[test]
+    fn template_tx_for_block_preserves_fee_backed_txid() {
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"test1dest","value":1_000_000}],
+            "fee": 10_000,
+            "size": 222
+        });
+        let txid = crate::store::txid_from_value(&json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"test1dest","value":1_000_000}],
+            "fee": 10_000
+        }))
+        .expect("txid");
+        let embedded = template_tx_for_block(&tx);
+        assert_eq!(embedded.get("fee").and_then(|v| v.as_u64()), Some(10_000));
+        assert_eq!(
+            crate::store::txid_from_value(&embedded).expect("embedded txid"),
+            txid
+        );
     }
 }
