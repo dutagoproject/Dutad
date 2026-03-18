@@ -76,8 +76,8 @@ If something goes wrong:
 4. check whether the daemon can still sync from peers
 5. avoid overwriting the last known good backup
 
-## Beta reminder
+## Final release reminder
 
-This release line is still beta.
+This release line is intended for final mainnet operations.
 
 Do not wait for an incident before testing your backup and recovery path.
