@@ -20,7 +20,7 @@ For `dutad`, the main data lives under the DUTA data directory.
 Typical mainnet path:
 
 ```text
-/root/.duta/mainnet
+/root/.duta
 ```
 
 What to keep:
@@ -52,7 +52,7 @@ If you use custom seed nodes or custom startup flags, back those up too.
 Example config backup:
 
 ```bash
-cp /root/.duta/mainnet/duta.conf /root/backups/duta.conf
+cp /root/.duta/duta.conf /root/backups/duta.conf
 ```
 
 ## Restore a node

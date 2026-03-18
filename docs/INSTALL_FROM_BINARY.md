@@ -58,9 +58,8 @@ install -m 0755 dutaminer /usr/local/bin/dutaminer
 Create the data directory:
 
 ```bash
-mkdir -p /root/.duta/mainnet
+mkdir -p /root/.duta
 chmod 700 /root/.duta
-chmod 700 /root/.duta/mainnet
 ```
 
 Then continue with [Linux service deployment](DEPLOY_LINUX_SERVICES.md).
@@ -89,7 +88,7 @@ Linux:
 /usr/local/bin/dutad
 /usr/local/bin/duta-cli
 /usr/local/bin/dutaminer
-/root/.duta/mainnet
+/root/.duta
 ```
 
 Windows:

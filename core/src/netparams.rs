@@ -155,7 +155,7 @@ pub fn pow_retarget_window(net: Network) -> u64 {
 
 pub fn pow_start_bits(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 12,
+        Network::Mainnet => 16,
         Network::Testnet => 8,
         Network::Stagenet => 10,
     }
@@ -171,7 +171,7 @@ pub fn pow_max_bits(_net: Network) -> u64 {
 
 pub fn pow_bootstrap_sync_until_height(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 500,
+        Network::Mainnet => 0,
         Network::Testnet | Network::Stagenet => 0,
     }
 }
@@ -200,14 +200,14 @@ pub fn pow_bootstrap_sync_enabled(net: Network, _next_height: u64, _current_bits
 
 pub fn max_local_mining_sync_lag_blocks(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 20,
+        Network::Mainnet => 50,
         Network::Testnet | Network::Stagenet => 0,
     }
 }
 
 pub fn mining_sync_gate_until_height(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 1000,
+        Network::Mainnet => 600,
         Network::Testnet | Network::Stagenet => 0,
     }
 }

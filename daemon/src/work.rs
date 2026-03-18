@@ -5,7 +5,7 @@ use duta_core::dutahash;
 use duta_core::netparams::{self, Network};
 use duta_core::types::H32;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -152,6 +152,111 @@ fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     }
 }
 
+fn write_mempool_value(data_dir: &str, v: &serde_json::Value) -> Result<(), String> {
+    let path = format!("{}/mempool.json", data_dir.trim_end_matches('/'));
+    fs::write(&path, serde_json::to_vec(v).map_err(|e| format!("json_encode_failed: {}", e))?)
+        .map_err(|e| format!("mempool_write_failed: {}", e))
+}
+
+fn filter_template_mempool(
+    data_dir: &str,
+    next_height: u64,
+    mp: &serde_json::Value,
+) -> (serde_json::Value, bool) {
+    let Some(txs_obj) = mp.get("txs").and_then(|v| v.as_object()) else {
+        return (mp.clone(), false);
+    };
+    let ordered_ids: Vec<String> = mp
+        .get("txids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut kept_ids: Vec<String> = Vec::new();
+    let mut kept_txs = serde_json::Map::new();
+    let mut produced_outpoints: HashSet<String> = HashSet::new();
+    let mut consumed_outpoints: HashSet<String> = HashSet::new();
+
+    for txid in ordered_ids {
+        let Some(txv) = txs_obj.get(&txid) else {
+            continue;
+        };
+        let vin = txv
+            .get("vin")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let vout = txv
+            .get("vout")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut valid = true;
+        for input in &vin {
+            let Some(prev_txid) = input.get("txid").and_then(|v| v.as_str()) else {
+                valid = false;
+                break;
+            };
+            let Some(prev_vout) = input.get("vout").and_then(|v| v.as_u64()) else {
+                valid = false;
+                break;
+            };
+            let outpoint = format!("{}:{}", prev_txid, prev_vout);
+            if consumed_outpoints.contains(&outpoint) {
+                valid = false;
+                break;
+            }
+            if produced_outpoints.contains(&outpoint) {
+                consumed_outpoints.insert(outpoint);
+                continue;
+            }
+            match store::utxo_get(data_dir, prev_txid, prev_vout) {
+                Some((_value, created_height, is_coinbase, _pkh)) => {
+                    if is_coinbase
+                        && next_height < created_height.saturating_add(store::COINBASE_MATURITY)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    consumed_outpoints.insert(outpoint);
+                }
+                None => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+
+        if !valid {
+            continue;
+        }
+
+        for (idx, _output) in vout.iter().enumerate() {
+            produced_outpoints.insert(format!("{}:{}", txid, idx));
+        }
+        kept_ids.push(txid.clone());
+        kept_txs.insert(txid, txv.clone());
+    }
+
+    let removed = kept_txs.len() != txs_obj.len();
+    if !removed {
+        return (mp.clone(), false);
+    }
+
+    (
+        json!({
+            "txids": kept_ids,
+            "txs": kept_txs
+        }),
+        true,
+    )
+}
+
 fn short_id(id: &str) -> &str {
     if id.len() <= 8 {
         id
@@ -264,12 +369,6 @@ pub(crate) fn build_work_template(
         return Err("miner_address_conflicts_with_devfee".to_string());
     }
 
-    let mp = read_mempool_value(data_dir);
-    let mut txids = mp
-        .get("txids")
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
     let (tip_h, tip_hash32, _tip_bits, tip_chainwork) =
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
 
@@ -284,6 +383,16 @@ pub(crate) fn build_work_template(
         ));
     }
     let height = next_height;
+    let mp = read_mempool_value(data_dir);
+    let (mp, filtered_invalid_txs) = filter_template_mempool(data_dir, next_height, &mp);
+    if filtered_invalid_txs {
+        let _ = write_mempool_value(data_dir, &mp);
+    }
+    let mut txids = mp
+        .get("txids")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
     let prevhash32 = tip_hash32;
     let bits = store::expected_bits_next(data_dir)?;
     let chainwork =

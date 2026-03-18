@@ -23,7 +23,7 @@ Install the binaries to:
 Mainnet:
 
 ```text
-/root/.duta/mainnet
+/root/.duta
 ```
 
 Testnet:
@@ -47,9 +47,8 @@ Copy them to:
 ## Enable the services
 
 ```bash
-mkdir -p /root/.duta/mainnet
+mkdir -p /root/.duta
 chmod 700 /root/.duta
-chmod 700 /root/.duta/mainnet
 
 systemctl daemon-reload
 systemctl enable dutad
