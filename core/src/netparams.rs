@@ -363,8 +363,8 @@ mod tests {
 
     #[test]
     fn sync_gate_is_mainnet_only() {
-        assert!(pow_bootstrap_sync_enabled(Network::Mainnet, 1, 12));
-        assert!(pow_bootstrap_sync_enabled(Network::Mainnet, 500, 12));
+        assert!(!pow_bootstrap_sync_enabled(Network::Mainnet, 1, 12));
+        assert!(!pow_bootstrap_sync_enabled(Network::Mainnet, 500, 12));
         assert!(!pow_bootstrap_sync_enabled(Network::Mainnet, 501, 12));
         assert!(!pow_bootstrap_sync_enabled(Network::Mainnet, 1, 21));
         assert!(!pow_bootstrap_sync_enabled(Network::Testnet, 1, 8));

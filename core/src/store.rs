@@ -1,6 +1,7 @@
 use crate::ChainBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use duta_core::amount::DUT_PER_DUTA;
 use duta_core::netparams::{devfee_addrs, devfee_bps, genesis_hash, pow_bootstrap_sync_enabled, pow_bootstrap_sync_recent_span, pow_max_bits, pow_min_bits, pow_retarget_window, pow_start_bits, pow_target_secs, Network};
 use duta_core::dutahash;
 use duta_core::address;
@@ -21,7 +22,7 @@ pub const MAX_FUTURE_DRIFT_SECS: u64 = 2 * 60 * 60;
 pub const COINBASE_MATURITY: u64 = 60;
 
 fn block_subsidy(height: u64) -> u64 {
-    const INITIAL_BLOCK_REWARD: u64 = 50;
+    const INITIAL_BLOCK_REWARD: u64 = 50 * DUT_PER_DUTA;
     const HALVING_INTERVAL: u64 = 210_000;
     const MAX_HALVINGS: u64 = 64;
 

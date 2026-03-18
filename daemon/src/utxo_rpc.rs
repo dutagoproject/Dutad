@@ -1,5 +1,39 @@
 use crate::store;
+use duta_core::amount::{format_dut_u64, BASE_UNIT, DISPLAY_UNIT, DUTA_DECIMALS};
 use serde_json::json;
+
+fn utxo_response_json(
+    txid: &str,
+    vout: u64,
+    entry: Option<(u64, u64, bool, String)>,
+) -> serde_json::Value {
+    match entry {
+        Some((amount, height, coinbase, pkh)) => json!({
+            "found": true,
+            "txid": txid,
+            "vout": vout,
+            "amount": format_dut_u64(amount),
+            "amount_display": format_dut_u64(amount),
+            "amount_dut": amount,
+            "height": height,
+            "coinbase": coinbase,
+            "pkh": pkh,
+            "unit": DISPLAY_UNIT,
+            "display_unit": DISPLAY_UNIT,
+            "base_unit": BASE_UNIT,
+            "decimals": DUTA_DECIMALS
+        }),
+        None => json!({
+            "found": false,
+            "txid": txid,
+            "vout": vout,
+            "unit": DISPLAY_UNIT,
+            "display_unit": DISPLAY_UNIT,
+            "base_unit": BASE_UNIT,
+            "decimals": DUTA_DECIMALS
+        }),
+    }
+}
 
 /// GET /utxo?txid=<hex>&vout=<n>
 /// Response: {"found":bool, ...}
@@ -59,18 +93,8 @@ pub fn handle_utxo(
         }
     };
 
-    match store::utxo_get(data_dir, &txid, vout) {
-        Some((amount, height, coinbase, pkh)) => respond_json(
-            request,
-            tiny_http::StatusCode(200),
-            json!({"found":true,"txid":txid,"vout":vout,"amount":amount,"height":height,"coinbase":coinbase,"pkh":pkh}).to_string(),
-        ),
-        None => respond_json(
-            request,
-            tiny_http::StatusCode(200),
-            json!({"found":false,"txid":txid,"vout":vout}).to_string(),
-        ),
-    }
+    let body = utxo_response_json(&txid, vout, store::utxo_get(data_dir, &txid, vout));
+    respond_json(request, tiny_http::StatusCode(200), body.to_string());
 }
 
 fn percent_decode(s: &str) -> String {
@@ -111,4 +135,31 @@ fn percent_decode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utxo_response_json;
+
+    #[test]
+    fn utxo_response_uses_display_amount_and_raw_base_unit_side_by_side() {
+        let body = utxo_response_json("ab", 1, Some((1, 22, false, "pkh".to_string())));
+        assert_eq!(body.get("amount").and_then(|x| x.as_str()), Some("0.00000001"));
+        assert_eq!(body.get("amount_display").and_then(|x| x.as_str()), Some("0.00000001"));
+        assert_eq!(body.get("amount_dut").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(body.get("unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(body.get("display_unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(body.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
+        assert_eq!(body.get("decimals").and_then(|x| x.as_u64()), Some(8));
+    }
+
+    #[test]
+    fn utxo_not_found_still_exposes_unit_metadata() {
+        let body = utxo_response_json("ab", 2, None);
+        assert_eq!(body.get("found").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(body.get("unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(body.get("display_unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(body.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
+        assert_eq!(body.get("decimals").and_then(|x| x.as_u64()), Some(8));
+    }
 }

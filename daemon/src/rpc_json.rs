@@ -1,3 +1,6 @@
+use duta_core::amount::{
+    format_dut_u64, BASE_UNIT, DEFAULT_MIN_RELAY_FEE_PER_KB_DUT, DISPLAY_UNIT, DUTA_DECIMALS,
+};
 use duta_core::netparams::{genesis_hash, pow_start_bits, Network};
 use duta_core::types::H32;
 use serde_json::json;
@@ -1140,7 +1143,10 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
                     "testnet": net != "mainnet",
                     "errors": "",
                     "warnings": "",
-                    "unit": "DUTA"
+                    "unit": DISPLAY_UNIT,
+                    "display_unit": DISPLAY_UNIT,
+                    "base_unit": BASE_UNIT,
+                    "decimals": DUTA_DECIMALS
                 }),
             ))
         }
@@ -1175,7 +1181,12 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
                 "last_outbound_error": p2p.get("last_outbound_error").cloned().unwrap_or(serde_json::Value::Null),
                 "last_outbound_error_secs": p2p.get("last_outbound_error_secs").cloned().unwrap_or(serde_json::Value::Null),
                 "localservices": "network",
-                "relayfee": 0,
+                "relayfee": format_dut_u64(DEFAULT_MIN_RELAY_FEE_PER_KB_DUT),
+                "relayfee_dut": DEFAULT_MIN_RELAY_FEE_PER_KB_DUT,
+                "unit": DISPLAY_UNIT,
+                "display_unit": DISPLAY_UNIT,
+                "base_unit": BASE_UNIT,
+                "decimals": DUTA_DECIMALS,
                 "warnings": ""
             });
             Ok(ok(id, v))
@@ -1431,6 +1442,48 @@ mod tests {
             super::net_from_datadir(&data_dir),
             duta_core::netparams::Network::Testnet
         );
+    }
+
+    #[test]
+    fn rpc_info_exposes_display_and_base_unit_metadata() {
+        let out = handle_rpc(
+            json!({"id":1,"method":"getinfo","params":[]}).to_string().as_bytes(),
+            "C:/dutaproject/testnet",
+            "testnet",
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let result = v.get("result").cloned().unwrap_or_else(|| json!({}));
+        assert_eq!(result.get("unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(
+            result.get("display_unit").and_then(|x| x.as_str()),
+            Some("DUTA")
+        );
+        assert_eq!(result.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
+        assert_eq!(result.get("decimals").and_then(|x| x.as_u64()), Some(8));
+    }
+
+    #[test]
+    fn rpc_network_info_exposes_display_and_base_unit_metadata() {
+        let out = handle_rpc(
+            json!({"id":1,"method":"getnetworkinfo","params":[]})
+                .to_string()
+                .as_bytes(),
+            "C:/dutaproject/testnet",
+            "testnet",
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let result = v.get("result").cloned().unwrap_or_else(|| json!({}));
+        assert_eq!(result.get("unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(
+            result.get("display_unit").and_then(|x| x.as_str()),
+            Some("DUTA")
+        );
+        assert_eq!(result.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
+        assert_eq!(result.get("decimals").and_then(|x| x.as_u64()), Some(8));
+        assert_eq!(result.get("relayfee").and_then(|x| x.as_str()), Some("0.0001"));
+        assert_eq!(result.get("relayfee_dut").and_then(|x| x.as_u64()), Some(10_000));
     }
 
     #[test]
