@@ -800,27 +800,38 @@ fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
     let pid_s = match fs::read_to_string(&pid_path) {
         Ok(s) => s,
         Err(_) => {
-            println!("dutad: stopped");
-            println!("rpc: {}", rpc_addr);
-            println!(
-                "rpc_reachable: {}",
-                if rpc_reachable { "yes" } else { "no" }
-            );
-            return 1;
+            if rpc_reachable {
+                println!("dutad: running");
+                println!("pid: externally_managed_or_missing");
+                println!("rpc: {}", rpc_addr);
+                println!("rpc_reachable: yes");
+                return 0;
+            } else {
+                println!("dutad: stopped");
+                println!("rpc: {}", rpc_addr);
+                println!("rpc_reachable: no");
+                return 1;
+            }
         }
     };
     let pid: i32 = match pid_s.trim().parse() {
         Ok(p) if p > 1 => p,
         _ => {
             let _ = fs::remove_file(&pid_path);
-            println!("dutad: stopped");
-            println!("stale_pid_removed: invalid");
-            println!("rpc: {}", rpc_addr);
-            println!(
-                "rpc_reachable: {}",
-                if rpc_reachable { "yes" } else { "no" }
-            );
-            return 1;
+            if rpc_reachable {
+                println!("dutad: running");
+                println!("stale_pid_removed: invalid");
+                println!("pid: externally_managed_or_missing");
+                println!("rpc: {}", rpc_addr);
+                println!("rpc_reachable: yes");
+                return 0;
+            } else {
+                println!("dutad: stopped");
+                println!("stale_pid_removed: invalid");
+                println!("rpc: {}", rpc_addr);
+                println!("rpc_reachable: no");
+                return 1;
+            }
         }
     };
     if process_exists(pid) {
@@ -834,14 +845,20 @@ fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
         return if rpc_reachable { 0 } else { 1 };
     }
     let _ = fs::remove_file(&pid_path);
-    println!("dutad: stopped");
-    println!("stale_pid_removed: {}", pid);
-    println!("rpc: {}", rpc_addr);
-    println!(
-        "rpc_reachable: {}",
-        if rpc_reachable { "yes" } else { "no" }
-    );
-    1
+    if rpc_reachable {
+        println!("dutad: running");
+        println!("stale_pid_removed: {}", pid);
+        println!("pid: externally_managed_or_missing");
+        println!("rpc: {}", rpc_addr);
+        println!("rpc_reachable: yes");
+        0
+    } else {
+        println!("dutad: stopped");
+        println!("stale_pid_removed: {}", pid);
+        println!("rpc: {}", rpc_addr);
+        println!("rpc_reachable: no");
+        1
+    }
 }
 
 fn wait_for_daemon_rpc_ready(
@@ -2375,5 +2392,31 @@ mod tests {
         let args = Args::parse_from(["dutad", "status"]);
         assert!(matches!(args.command, Some(super::Cmd::Status)));
         assert!(!args.stop);
+    }
+
+    #[test]
+    fn daemon_status_treats_reachable_rpc_without_pid_file_as_running() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.flush();
+            }
+        });
+
+        let data_dir = temp_datadir("daemon-status-rpc-reachable");
+        let rc = super::daemon_status(&data_dir, &addr.to_string());
+        assert_eq!(rc, 0);
+
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
