@@ -1,5 +1,6 @@
+use crate::amount_display::format_dut_fixed_8;
 use crate::store;
-use duta_core::amount::{format_dut_u64, BASE_UNIT, DISPLAY_UNIT, DUTA_DECIMALS};
+use duta_core::amount::{BASE_UNIT, DISPLAY_UNIT, DUTA_DECIMALS};
 use serde_json::json;
 
 fn utxo_response_json(
@@ -12,8 +13,8 @@ fn utxo_response_json(
             "found": true,
             "txid": txid,
             "vout": vout,
-            "amount": format_dut_u64(amount),
-            "amount_display": format_dut_u64(amount),
+            "amount": format_dut_fixed_8(amount),
+            "amount_display": format_dut_fixed_8(amount),
             "amount_dut": amount,
             "height": height,
             "coinbase": coinbase,
@@ -151,6 +152,17 @@ mod tests {
         assert_eq!(body.get("display_unit").and_then(|x| x.as_str()), Some("DUTA"));
         assert_eq!(body.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
         assert_eq!(body.get("decimals").and_then(|x| x.as_u64()), Some(8));
+    }
+
+    #[test]
+    fn utxo_response_keeps_fixed_eight_decimal_display_amounts() {
+        let body = utxo_response_json("ab", 1, Some((10_000, 22, false, "pkh".to_string())));
+        assert_eq!(body.get("amount").and_then(|x| x.as_str()), Some("0.00010000"));
+        assert_eq!(
+            body.get("amount_display").and_then(|x| x.as_str()),
+            Some("0.00010000")
+        );
+        assert_eq!(body.get("amount_dut").and_then(|x| x.as_u64()), Some(10_000));
     }
 
     #[test]
