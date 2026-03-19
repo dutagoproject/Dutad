@@ -1,6 +1,7 @@
-# DUTA 0.0.1 Beta
+# DUTA 0.0.1 Beta (Historical Archive)
 
-This is the first beta release draft for the `dutad` repo split.
+This document is kept as an archive of the original beta release draft.
+It should not be used as the release status for the current repository state.
 
 ## Included components
 
@@ -17,8 +18,8 @@ This is the first beta release draft for the `dutad` repo split.
 
 ## Important notes
 
-- this release is still beta
-- more testing is still needed before calling it production-ready
+- this text describes the original beta draft, not the current final release line
+- use the active `1.0.0` release docs elsewhere in this repo for current packaging and operator guidance
 - daemon admin RPC should stay local-only
 - public mining listeners should be exposed deliberately, not by accident
 

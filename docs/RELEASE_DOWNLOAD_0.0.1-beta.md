@@ -1,7 +1,9 @@
-# dutad 0.0.1-beta
+# dutad 0.0.1-beta (Historical Archive)
 
-This is the first public beta release of the DUTA node stack.
-It is meant for people who want to run the network, inspect it, and work with the node directly.
+This document is kept only as an archive of the first public beta package notes.
+It is not the current release guidance for the repository.
+
+For the active release line, use the `1.0.0` packaging and install guides in this repo.
 
 ## Highlights
 
@@ -48,8 +50,9 @@ Choose the archive that matches your platform:
 
 If a checksum file is attached to the release, verify it before running the binaries.
 
-## Notes for this beta
+## Archive note
 
-This release is a public beta baseline. It is aimed at operators, testers, and early infrastructure work, not one-click desktop users.
+This beta package note is preserved for historical reference only.
+For current operator guidance, use the final `1.0.0` release and deployment documents in this repository.
 
 For build, deployment, and security notes, see the repository documentation.
