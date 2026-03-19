@@ -1766,13 +1766,14 @@ pub fn utxos_for_addresses(
     data_dir: &str,
     addresses: &[String],
 ) -> Result<Vec<(String, u64, u64, u64, bool, String)>, String> {
+    let net = infer_network(data_dir);
     let mut target_by_pkh: HashMap<String, String> = HashMap::new();
     for addr in addresses {
-        let pkh = address::parse_address(addr)
+        let pkh = address::parse_address_for_network(net, addr)
             .ok_or_else(|| format!("invalid_address: {}", addr))?;
         target_by_pkh
             .entry(address::pkh_to_hex(&pkh))
-            .or_insert_with(|| addr.clone());
+            .or_insert_with(|| address::pkh_to_address_for_network(net, &pkh));
     }
     if target_by_pkh.is_empty() {
         return Ok(Vec::new());
@@ -1928,6 +1929,7 @@ mod tests_a5 {
     fn utxos_for_addresses_reads_active_set_without_block_history() {
         let data_dir = temp_datadir("wallet-utxo-snapshot");
         let db_path = format!("{}/db", data_dir.trim_end_matches('/'));
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
         let db = sled::open(&db_path).unwrap();
         let utxo = db.open_tree(b"utxo").unwrap();
         let addr_a = "dut1111111111111111111111111111111111111111".to_string();
@@ -1946,6 +1948,18 @@ mod tests_a5 {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], ("aa".to_string(), 0, 50, 100, false, addr_a));
         assert_eq!(got[1], ("bb".to_string(), 1, 75, 101, true, addr_b));
+    }
+
+    #[test]
+    fn utxos_for_addresses_rejects_wrong_network_prefix() {
+        let data_dir = temp_datadir("wallet-utxo-network-lock");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        let err = utxos_for_addresses(
+            &data_dir,
+            &["test1111111111111111111111111111111111111111".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid_address"));
     }
 
     #[test]
