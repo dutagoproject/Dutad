@@ -88,13 +88,13 @@ Look for:
 - address validation failures
 - repeated work rejects
 
-## Beta warning
+## Operational caution
 
-This release line is still beta.
+This repository is on the final `1.0.0` release line, but the usual operational discipline still applies.
 
 That means:
 
-- do not treat it like hardened enterprise infrastructure
-- test changes before exposing them publicly
+- do not treat internet exposure as low risk just because the release is stable
+- test deployment changes before exposing them publicly
 - keep backups current
-- expect to keep improving deployment practice over time
+- review logs, firewall rules, and service boundaries regularly
