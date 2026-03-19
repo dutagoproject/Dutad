@@ -1,5 +1,6 @@
 #[macro_use]
 mod debuglog;
+mod amount_display;
 mod canon_json;
 use clap::{Parser, Subcommand};
 use duta_core::netparams::Network;

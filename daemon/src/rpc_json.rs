@@ -1,6 +1,5 @@
-use duta_core::amount::{
-    format_dut_u64, BASE_UNIT, DEFAULT_MIN_RELAY_FEE_PER_KB_DUT, DISPLAY_UNIT, DUTA_DECIMALS,
-};
+use crate::amount_display::format_dut_fixed_8;
+use duta_core::amount::{BASE_UNIT, DEFAULT_MIN_RELAY_FEE_PER_KB_DUT, DISPLAY_UNIT, DUTA_DECIMALS};
 use duta_core::netparams::{genesis_hash, pow_start_bits, Network};
 use duta_core::types::H32;
 use serde_json::json;
@@ -1181,7 +1180,7 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
                 "last_outbound_error": p2p.get("last_outbound_error").cloned().unwrap_or(serde_json::Value::Null),
                 "last_outbound_error_secs": p2p.get("last_outbound_error_secs").cloned().unwrap_or(serde_json::Value::Null),
                 "localservices": "network",
-                "relayfee": format_dut_u64(DEFAULT_MIN_RELAY_FEE_PER_KB_DUT),
+                "relayfee": format_dut_fixed_8(DEFAULT_MIN_RELAY_FEE_PER_KB_DUT),
                 "relayfee_dut": DEFAULT_MIN_RELAY_FEE_PER_KB_DUT,
                 "unit": DISPLAY_UNIT,
                 "display_unit": DISPLAY_UNIT,
@@ -1482,7 +1481,10 @@ mod tests {
         );
         assert_eq!(result.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
         assert_eq!(result.get("decimals").and_then(|x| x.as_u64()), Some(8));
-        assert_eq!(result.get("relayfee").and_then(|x| x.as_str()), Some("0.0001"));
+        assert_eq!(
+            result.get("relayfee").and_then(|x| x.as_str()),
+            Some("0.00010000")
+        );
         assert_eq!(result.get("relayfee_dut").and_then(|x| x.as_u64()), Some(10_000));
     }
 
