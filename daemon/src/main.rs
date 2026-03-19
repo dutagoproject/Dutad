@@ -1086,7 +1086,14 @@ fn request_is_loopback(request: &tiny_http::Request) -> bool {
 fn admin_path_requires_loopback(path: &str) -> bool {
     matches!(
         path,
-        "/rpc" | "/submit_tx" | "/rollback_to" | "/prune" | "/utxo" | "/work" | "/submit_work"
+        "/rpc"
+            | "/submit_tx"
+            | "/rollback_to"
+            | "/prune"
+            | "/utxo"
+            | "/wallet_utxos"
+            | "/work"
+            | "/submit_work"
     ) || path.starts_with("/work/")
 }
 
@@ -1675,6 +1682,21 @@ fn start_rpc_servers(
                 }
                 utxo_rpc::handle_utxo(request, &data_dir, respond_json);
             }
+            "/wallet_utxos" => {
+                if !request_is_loopback(&request) {
+                    respond_error(request, tiny_http::StatusCode(404), "not_found");
+                    continue;
+                }
+                if request.method() != &tiny_http::Method::Post {
+                    respond_method_not_allowed(request);
+                    continue;
+                }
+                if !rate_allow(&request, "query") {
+                    respond_429(request);
+                    continue;
+                }
+                utxo_rpc::handle_wallet_utxos(request, &data_dir, respond_json);
+            }
             "/submit_tx" => {
                 if !request_is_loopback(&request) {
                     respond_error(request, tiny_http::StatusCode(404), "not_found");
@@ -2244,6 +2266,7 @@ mod tests {
             "/rollback_to",
             "/prune",
             "/utxo",
+            "/wallet_utxos",
             "/work",
             "/submit_work",
             "/work/duta1example",
