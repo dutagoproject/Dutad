@@ -1652,10 +1652,14 @@ pub fn note_accepted_block(data_dir: &str, b: &ChainBlock) -> Result<(), String>
     }
     set_tip_fields_db(&meta, b2.height, b2.hash32.clone(), b2.chainwork, b2.bits)?;
     append_chain_mirror_if_present(data_dir, &b2);
-    // prune body/undo beyond a safe window (reorg depth window)
-    let _ = prune(data_dir, REORG_UNDO_WINDOW);
+    // Default node behavior must keep full block history unless pruning is requested explicitly.
+    maybe_prune_after_accepted_block(data_dir)?;
 
     db.flush().map_err(|e| format!("db_flush_failed: {}", e))?;
+    Ok(())
+}
+
+fn maybe_prune_after_accepted_block(_data_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -1758,6 +1762,61 @@ pub fn utxo_get(data_dir: &str, txid: &str, vout: u64) -> Option<(u64, u64, bool
     Some((value, ch, cb, pkh))
 }
 
+pub fn utxos_for_addresses(
+    data_dir: &str,
+    addresses: &[String],
+) -> Result<Vec<(String, u64, u64, u64, bool, String)>, String> {
+    let mut target_by_pkh: HashMap<String, String> = HashMap::new();
+    for addr in addresses {
+        let pkh = address::parse_address(addr)
+            .ok_or_else(|| format!("invalid_address: {}", addr))?;
+        target_by_pkh
+            .entry(address::pkh_to_hex(&pkh))
+            .or_insert_with(|| addr.clone());
+    }
+    if target_by_pkh.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let db = open_db(data_dir)?;
+    let utxo = tree_utxo(&db)?;
+    let mut out = Vec::new();
+
+    for item in utxo.iter() {
+        let (key, bytes) = item.map_err(|e| format!("utxo_iter_failed: {}", e))?;
+        let key = std::str::from_utf8(key.as_ref())
+            .map_err(|e| format!("utxo_key_invalid_utf8: {}", e))?;
+        let Some((txid, vout_s)) = key.rsplit_once(':') else {
+            return Err(format!("utxo_key_invalid: {}", key));
+        };
+        let vout = vout_s
+            .parse::<u64>()
+            .map_err(|e| format!("utxo_key_invalid_vout: {}", e))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("utxo_decode_failed: {}", e))?;
+        let pkh = value
+            .get("pkh")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let Some(address) = target_by_pkh.get(pkh) else {
+            continue;
+        };
+        let amount = value.get("value").and_then(|x| x.as_u64()).unwrap_or(0);
+        let height = value
+            .get("created_height")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let coinbase = value
+            .get("is_coinbase")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        out.push((txid.to_string(), vout, amount, height, coinbase, address.clone()));
+    }
+
+    out.sort_by(|a, b| (a.0.clone(), a.1).cmp(&(b.0.clone(), b.1)));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests_a5 {
     use super::*;
@@ -1790,6 +1849,25 @@ mod tests_a5 {
         let k = outpoint_key(txid, vout);
         let v =
             json!({"value": value, "created_height": created_height, "is_coinbase": is_coinbase});
+        utxo.insert(k, serde_json::to_vec(&v).unwrap()).unwrap();
+    }
+
+    fn put_utxo_with_pkh(
+        utxo: &sled::Tree,
+        txid: &str,
+        vout: u64,
+        value: u64,
+        created_height: u64,
+        is_coinbase: bool,
+        pkh_hex: &str,
+    ) {
+        let k = outpoint_key(txid, vout);
+        let v = json!({
+            "value": value,
+            "created_height": created_height,
+            "is_coinbase": is_coinbase,
+            "pkh": pkh_hex
+        });
         utxo.insert(k, serde_json::to_vec(&v).unwrap()).unwrap();
     }
 
@@ -1844,6 +1922,30 @@ mod tests_a5 {
         )];
         let err = validate_coinbase_subsidy(&utxo, 210_000, &txs).unwrap_err();
         assert!(err.contains("coinbase_overpay"));
+    }
+
+    #[test]
+    fn utxos_for_addresses_reads_active_set_without_block_history() {
+        let data_dir = temp_datadir("wallet-utxo-snapshot");
+        let db_path = format!("{}/db", data_dir.trim_end_matches('/'));
+        let db = sled::open(&db_path).unwrap();
+        let utxo = db.open_tree(b"utxo").unwrap();
+        let addr_a = "dut1111111111111111111111111111111111111111".to_string();
+        let addr_b = "dut2222222222222222222222222222222222222222".to_string();
+        let pkh_a = address::pkh_to_hex(&address::parse_address(&addr_a).unwrap());
+        let pkh_b = address::pkh_to_hex(&address::parse_address(&addr_b).unwrap());
+        put_utxo_with_pkh(&utxo, "aa", 0, 50, 100, false, &pkh_a);
+        put_utxo_with_pkh(&utxo, "bb", 1, 75, 101, true, &pkh_b);
+        put_utxo_with_pkh(&utxo, "cc", 2, 99, 102, false, "3333333333333333333333333333333333333333");
+        utxo.flush().unwrap();
+        db.flush().unwrap();
+        drop(utxo);
+        drop(db);
+
+        let got = utxos_for_addresses(&data_dir, &[addr_b.clone(), addr_a.clone()]).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], ("aa".to_string(), 0, 50, 100, false, addr_a));
+        assert_eq!(got[1], ("bb".to_string(), 1, 75, 101, true, addr_b));
     }
 
     #[test]
@@ -2034,6 +2136,52 @@ mod tests_a5 {
         assert!(block_at(&data_dir, 1).is_none());
         assert!(height_by_hash(&data_dir, &format!("{:064x}", 1)).is_none());
         assert!(block_at(&data_dir, 2).is_some());
+    }
+
+    #[test]
+    fn accepted_block_path_does_not_auto_prune_by_default() {
+        let data_dir = temp_datadir("no-auto-prune");
+        let db = open_db(&data_dir).unwrap();
+        let meta = tree_meta(&db).unwrap();
+        let blocks = tree_blocks(&db).unwrap();
+        let hash_index = tree_hash_index(&db).unwrap();
+        let undo = tree_undo(&db).unwrap();
+
+        for h in 1..=3u64 {
+            let block = ChainBlock {
+                height: h,
+                hash32: format!("{:064x}", h),
+                bits: 1,
+                chainwork: h * 2,
+                timestamp: Some(h),
+                prevhash32: Some(format!("{:064x}", h.saturating_sub(1))),
+                merkle32: Some(format!("{:064x}", h + 100)),
+                nonce: Some(0),
+                miner: Some("miner".to_string()),
+                pow_digest32: Some(format!("{:064x}", h + 200)),
+                txs: None,
+            };
+            put_block_db(&blocks, &block).unwrap();
+            put_hash_index_db(&hash_index, &block.hash32, h).unwrap();
+            undo.insert(
+                undo_key(h),
+                serde_json::to_vec(&json!({"created":[],"spent":{}})).unwrap(),
+            )
+            .unwrap();
+        }
+        set_tip_fields_db(&meta, 3, format!("{:064x}", 3), 6, 1).unwrap();
+        db.flush().unwrap();
+        drop(undo);
+        drop(hash_index);
+        drop(blocks);
+        drop(meta);
+        drop(db);
+
+        maybe_prune_after_accepted_block(&data_dir).unwrap();
+
+        assert_eq!(prune_below(&data_dir), 0);
+        assert!(block_at(&data_dir, 1).is_some());
+        assert!(height_by_hash(&data_dir, &format!("{:064x}", 1)).is_some());
     }
 
     #[test]

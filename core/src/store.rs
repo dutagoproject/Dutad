@@ -1258,11 +1258,15 @@ if let Ok(txs) = parse_txs_from_block(&b2) {
     let _ = crate::submit_tx::orphan_try_promote_file(data_dir);
 }
 set_tip_fields_db(&meta, b2.height, b2.hash32.clone(), b2.chainwork, b2.bits)?;
-// prune body/undo beyond a safe window (reorg depth window)
-let _ = prune(data_dir, REORG_UNDO_WINDOW);
+// Default node behavior must keep full block history unless pruning is requested explicitly.
+maybe_prune_after_accepted_block(data_dir)?;
 
 db.flush().map_err(|e| format!("db_flush_failed: {}", e))?;
 Ok(())
+}
+
+fn maybe_prune_after_accepted_block(_data_dir: &str) -> Result<(), String> {
+    Ok(())
 }
 
 /// Tip fields from DB (if present), else None.
@@ -1377,6 +1381,52 @@ mod tests_a5 {
         let txs = vec![("tx1".to_string(), json!({"vin":[{"txid":"a","vout":0}], "vout":[{"value":6}]}))];
         let err = validate_utxo_invariants_for_block(&utxo, 10, &txs).unwrap_err();
         assert!(err.contains("fee_negative"));
+    }
+
+    #[test]
+    fn accepted_block_path_does_not_auto_prune_by_default() {
+        let data_dir = temp_datadir("no-auto-prune");
+        let db = open_db(&data_dir).unwrap();
+        let meta = tree_meta(&db).unwrap();
+        let blocks = tree_blocks(&db).unwrap();
+        let hash_index = tree_hash_index(&db).unwrap();
+        let undo = tree_undo(&db).unwrap();
+
+        for h in 1..=3u64 {
+            let block = ChainBlock {
+                height: h,
+                hash32: format!("{:064x}", h),
+                bits: 1,
+                chainwork: h * 2,
+                timestamp: Some(h),
+                prevhash32: Some(format!("{:064x}", h.saturating_sub(1))),
+                merkle32: Some(format!("{:064x}", h + 100)),
+                nonce: Some(0),
+                miner: Some("miner".to_string()),
+                pow_digest32: Some(format!("{:064x}", h + 200)),
+                txs: None,
+            };
+            put_block_db(&blocks, &block).unwrap();
+            put_hash_index_db(&hash_index, &block.hash32, h).unwrap();
+            undo.insert(
+                undo_key(h),
+                serde_json::to_vec(&json!({"created":[],"spent":{}})).unwrap(),
+            )
+            .unwrap();
+        }
+        set_tip_fields_db(&meta, 3, format!("{:064x}", 3), 6, 1).unwrap();
+        db.flush().unwrap();
+        drop(undo);
+        drop(hash_index);
+        drop(blocks);
+        drop(meta);
+        drop(db);
+
+        maybe_prune_after_accepted_block(&data_dir).unwrap();
+
+        assert_eq!(prune_below(&data_dir), 0);
+        assert!(block_at(&data_dir, 1).is_some());
+        assert!(height_by_hash(&data_dir, &format!("{:064x}", 1)).is_some());
     }
 }
 
