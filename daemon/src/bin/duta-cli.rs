@@ -37,7 +37,6 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    Help,
     Health,
     Tip,
     Blocksfrom {
@@ -136,7 +135,7 @@ fn main() {
     let timeout = Duration::from_millis(args.rpc_timeout_ms.max(1));
     let (host, port) = resolve_rpc(&args);
     let out = match &args.cmd {
-        Cmd::Health => http_get_json(&host, port, "/health", timeout),
+        Cmd::Health => http_get_json_allow_error_body(&host, port, "/health", timeout),
         Cmd::Tip => http_get_json(&host, port, "/tip", timeout),
         Cmd::Blocksfrom { from, limit } => http_get_json(
             &host,
@@ -150,7 +149,6 @@ fn main() {
             &format!("/utxo?txid={}&vout={}", url_enc(txid), vout),
             timeout,
         ),
-        Cmd::Help => rpc_call(&host, port, "help", vec![], timeout),
         Cmd::Getblockcount => rpc_call(&host, port, "getblockcount", vec![], timeout),
         Cmd::Getbestblockhash => rpc_call(&host, port, "getbestblockhash", vec![], timeout),
         Cmd::Getblockhash { height } => {
@@ -274,7 +272,7 @@ fn main() {
 
     match out {
         Ok(body) => {
-            let exit_code = print_rpc_output(&body, args.pretty && !args.raw, args.raw);
+            let exit_code = print_rpc_output(&args.cmd, &body, args.pretty && !args.raw, args.raw);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
@@ -286,21 +284,84 @@ fn main() {
     }
 }
 
-fn print_rpc_output(body: &str, pretty: bool, raw: bool) -> i32 {
+fn print_rpc_output(cmd: &Cmd, body: &str, pretty: bool, raw: bool) -> i32 {
     if raw {
         print_raw(body);
-        return rpc_error_exit_code(body);
+        return command_exit_code(cmd, body);
     }
     if pretty {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
             if let Ok(s) = serde_json::to_string_pretty(&v) {
                 println!("{s}");
-                return rpc_error_exit_code_from_value(&v);
+                return command_exit_code_from_value(cmd, &v);
             }
         }
     }
-    print_raw(body);
-    rpc_error_exit_code(body)
+    print_raw(&format_response(cmd, body));
+    command_exit_code(cmd, body)
+}
+
+fn json_field<'a>(v: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    let mut cur = v;
+    for part in path {
+        cur = cur.get(*part)?;
+    }
+    Some(cur)
+}
+
+fn json_bool(v: &serde_json::Value, path: &[&str]) -> Option<bool> {
+    json_field(v, path)?.as_bool()
+}
+
+fn json_i64(v: &serde_json::Value, path: &[&str]) -> Option<i64> {
+    json_field(v, path)?.as_i64()
+}
+
+fn json_f64(v: &serde_json::Value, path: &[&str]) -> Option<f64> {
+    json_field(v, path)?.as_f64()
+}
+
+fn json_str<'a>(v: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    json_field(v, path)?.as_str()
+}
+
+fn format_health_response(v: &serde_json::Value, _body: &str) -> String {
+    let status = json_str(v, &["status"]).unwrap_or("unknown");
+    let ready = json_bool(v, &["ok"]).unwrap_or(false);
+    let peer_ready = json_bool(v, &["peer_ready"]).unwrap_or(false);
+    let tip_height = json_i64(v, &["tip_height"]).unwrap_or(0);
+    let best_seen_height = json_i64(v, &["best_seen_height"]).unwrap_or(tip_height);
+    let peer_count = json_i64(v, &["peer_count"]).unwrap_or(0);
+    let persisted_peer_count = json_i64(v, &["persisted_peer_count"]).unwrap_or(0);
+    let ban_count = json_i64(v, &["ban_count"]).unwrap_or(0);
+    let sync_gate_detail = json_field(v, &["sync_gate_detail"])
+        .map(|value| match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let sync_progress = json_f64(v, &["sync_progress"]).unwrap_or(0.0) * 100.0;
+    let header = if ready {
+        "daemon ready"
+    } else {
+        "daemon not ready"
+    };
+    format!(
+        "{header}\nstatus: {status}\npeer ready: {}\npeer count: {peer_count} (persisted: {persisted_peer_count})\ntip height: {tip_height}\nbest seen: {best_seen_height}\nsync progress: {:.2}%\nban count: {ban_count}\nsync gate detail: {sync_gate_detail}",
+        if peer_ready { "yes" } else { "no" },
+        sync_progress
+    )
+}
+
+fn format_response(cmd: &Cmd, body: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return body.to_string(),
+    };
+    match cmd {
+        Cmd::Health => format_health_response(&v, body),
+        _ => body.to_string(),
+    }
 }
 
 fn print_raw(body: &str) {
@@ -310,11 +371,22 @@ fn print_raw(body: &str) {
     }
 }
 
-fn rpc_error_exit_code(body: &str) -> i32 {
+fn command_exit_code(cmd: &Cmd, body: &str) -> i32 {
     match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(v) => rpc_error_exit_code_from_value(&v),
+        Ok(v) => command_exit_code_from_value(cmd, &v),
         Err(_) => 0,
     }
+}
+
+fn command_exit_code_from_value(cmd: &Cmd, v: &serde_json::Value) -> i32 {
+    if matches!(cmd, Cmd::Health) {
+        return if v.get("ok").and_then(|x| x.as_bool()) == Some(false) {
+            1
+        } else {
+            0
+        };
+    }
+    rpc_error_exit_code_from_value(v)
 }
 
 fn rpc_error_exit_code_from_value(v: &serde_json::Value) -> i32 {
@@ -453,7 +525,19 @@ fn http_get_json(host: &str, port: u16, path: &str, timeout: Duration) -> Result
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: duta-cli\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
-    http_request(host, port, req.as_bytes(), timeout)
+    http_request(host, port, req.as_bytes(), timeout, false)
+}
+
+fn http_get_json_allow_error_body(
+    host: &str,
+    port: u16,
+    path: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: duta-cli\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    http_request(host, port, req.as_bytes(), timeout, true)
 }
 
 fn http_post_json(
@@ -467,10 +551,16 @@ fn http_post_json(
         "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: duta-cli\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
     );
-    http_request(host, port, req.as_bytes(), timeout)
+    http_request(host, port, req.as_bytes(), timeout, false)
 }
 
-fn http_request(host: &str, port: u16, req: &[u8], timeout: Duration) -> Result<String, String> {
+fn http_request(
+    host: &str,
+    port: u16,
+    req: &[u8],
+    timeout: Duration,
+    allow_error_body: bool,
+) -> Result<String, String> {
     let mut stream =
         TcpStream::connect((host, port)).map_err(|e| format!("connect {host}:{port}: {e}"))?;
     let _ = stream.set_read_timeout(Some(timeout));
@@ -528,6 +618,9 @@ fn http_request(host: &str, port: u16, req: &[u8], timeout: Duration) -> Result<
 
     let (status, body) = split_http_bytes(&buf)?;
     if !(200..=299).contains(&status) {
+        if allow_error_body {
+            return Ok(body);
+        }
         return Err(format!("HTTP {status}: {body}"));
     }
     Ok(body)
@@ -571,4 +664,55 @@ fn url_enc(s: &str) -> String {
     s.replace('%', "%25")
         .replace('+', "%2B")
         .replace(' ', "%20")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command_exit_code, format_response, Cmd};
+
+    #[test]
+    fn health_formats_no_peers_actionably() {
+        let out = format_response(
+            &Cmd::Health,
+            r#"{"ok":false,"status":"no_peers","tip_height":0,"sync_progress":1.0,"peer_ready":false}"#,
+        );
+        assert!(out.contains("daemon not ready"));
+        assert!(out.contains("status: no_peers"));
+        assert!(out.contains("peer ready: no"));
+        assert!(out.contains("sync progress: 100.00%"));
+    }
+
+    #[test]
+    fn health_formats_syncing_actionably() {
+        let out = format_response(
+            &Cmd::Health,
+            r#"{"ok":false,"status":"syncing","tip_height":128,"sync_progress":0.4740740740740741,"peer_ready":true}"#,
+        );
+        assert!(out.contains("daemon not ready"));
+        assert!(out.contains("status: syncing"));
+        assert!(out.contains("peer ready: yes"));
+        assert!(out.contains("tip height: 128"));
+        assert!(out.contains("sync progress: 47.41%"));
+    }
+
+    #[test]
+    fn health_formats_ready_actionably() {
+        let out = format_response(
+            &Cmd::Health,
+            r#"{"ok":true,"status":"ready","tip_height":512,"sync_progress":1.0,"peer_ready":true}"#,
+        );
+        assert!(out.contains("daemon ready"));
+        assert!(out.contains("status: ready"));
+        assert!(out.contains("peer ready: yes"));
+        assert!(out.contains("tip height: 512"));
+    }
+
+    #[test]
+    fn health_exit_code_is_nonzero_when_not_ready() {
+        let exit_code = command_exit_code(
+            &Cmd::Health,
+            r#"{"ok":false,"status":"no_peers","tip_height":0,"sync_progress":1.0,"peer_ready":false}"#,
+        );
+        assert_eq!(exit_code, 1);
+    }
 }

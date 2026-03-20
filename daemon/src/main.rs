@@ -1573,6 +1573,20 @@ fn start_rpc_servers(
                         store::tip_fields(&data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
                     let best_seen_height = p2p::best_seen_height().max(tip_height);
                     let has_healthy_peer = p2p::bootstrap_has_healthy_peer();
+                    let p2p_info = p2p::p2p_public_info();
+                    let peer_count = p2p_info
+                        .get("connections")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let ban_count = p2p_info
+                        .get("ban_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let persisted_peer_count = p2p_info
+                        .get("persisted_peer_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let sync_gate_detail = p2p_info.get("sync_gate_detail").cloned().unwrap_or(json!(null));
                     let (is_ready, health_status, sync_progress) =
                         daemon_health_state(tip_height, best_seen_height, has_healthy_peer);
                     let status = if is_ready {
@@ -1589,8 +1603,13 @@ fn start_rpc_servers(
                             "net": net_str.as_str(),
                             "version": env!("CARGO_PKG_VERSION"),
                             "tip_height": tip_height,
+                            "best_seen_height": best_seen_height,
                             "sync_progress": sync_progress,
-                            "peer_ready": has_healthy_peer
+                            "peer_ready": has_healthy_peer,
+                            "peer_count": peer_count,
+                            "persisted_peer_count": persisted_peer_count,
+                            "ban_count": ban_count,
+                            "sync_gate_detail": sync_gate_detail
                         })
                         .to_string(),
                     );
