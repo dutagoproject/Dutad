@@ -2072,7 +2072,6 @@ fn main() {
     }
 
     // Optional config file (bitcoin.conf style): default $DATADIR/duta.conf, or CLI --conf
-    let mut conf = duta_core::netparams::Conf::default();
     let mut conf_path = format!("{}/duta.conf", data_dir.trim_end_matches('/'));
     if let Some(cp) = args.conf.as_deref() {
         let cp2 = normalize_path_maybe_home(cp);
@@ -2080,13 +2079,13 @@ fn main() {
             conf_path = cp2;
         }
     }
-    match load_runtime_conf(&conf_path, args.conf.is_some()) {
-        Ok(parsed) => conf = parsed,
+    let mut conf = match load_runtime_conf(&conf_path, args.conf.is_some()) {
+        Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("dutad: {}", e);
             std::process::exit(1);
         }
-    }
+    };
     if let Err(e) = validate_conf_network_name(&conf) {
         eprintln!("dutad: {}", e);
         std::process::exit(1);
