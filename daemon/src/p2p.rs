@@ -152,7 +152,7 @@ fn is_transient_dial_error(err: &str) -> bool {
         || lower.contains("timed out")
 }
 
-fn bootstrap_has_healthy_peer() -> bool {
+pub(crate) fn bootstrap_has_healthy_peer() -> bool {
     let now = Instant::now();
     if let Ok(peers) = state().outbound_recent.lock() {
         if peers.values().any(|peer| {
