@@ -280,28 +280,32 @@ fn print_chain_status(data_dir: &str) {
     let (tip_height, tip_hash, _tip_chainwork, bits) =
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
     let best_seen_height = p2p::best_seen_height().max(tip_height);
-    let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
-        1.0
-    } else {
-        tip_height as f64 / best_seen_height as f64
-    };
+    let has_healthy_peer = p2p::bootstrap_has_healthy_peer();
+    let (_is_ready, health_status, sync_progress) =
+        daemon_health_state(tip_height, best_seen_height, has_healthy_peer);
     console_line(
         "CHAIN",
         ANSI_YELLOW,
         format!("tip={} bits={} hash={}", tip_height, bits, tip_hash),
     );
-    if best_seen_height > tip_height {
-        console_line(
-            "SYNC",
-            ANSI_YELLOW,
-            format!(
-                "syncing ({:.2}%) best_seen_height={}",
-                sync_progress * 100.0,
-                best_seen_height
-            ),
-        );
-    } else {
-        console_line("SYNC", ANSI_GREEN, "ready");
+    match health_status {
+        "no_peers" => {
+            console_line("SYNC", ANSI_YELLOW, "waiting_for_peers");
+        }
+        "syncing" => {
+            console_line(
+                "SYNC",
+                ANSI_YELLOW,
+                format!(
+                    "syncing ({:.2}%) best_seen_height={}",
+                    sync_progress * 100.0,
+                    best_seen_height
+                ),
+            );
+        }
+        _ => {
+            console_line("SYNC", ANSI_GREEN, "ready");
+        }
     }
 }
 
@@ -325,20 +329,20 @@ fn print_runtime_status_tick(data_dir: &str) {
     let (tip_height, tip_hash, _tip_chainwork, bits) =
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
     let best_seen_height = p2p::best_seen_height().max(tip_height);
-    let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
-        1.0
-    } else {
-        tip_height as f64 / best_seen_height as f64
-    };
+    let has_healthy_peer = p2p::bootstrap_has_healthy_peer();
+    let (_is_ready, health_status, sync_progress) =
+        daemon_health_state(tip_height, best_seen_height, has_healthy_peer);
     console_line(
         "STATUS",
         ANSI_CYAN,
         format!(
-            "tip={} best_seen={} bits={} sync={:.2}% hash={}",
+            "tip={} best_seen={} bits={} sync={:.2}% peer_ready={} status={} hash={}",
             tip_height,
             best_seen_height,
             bits,
             sync_progress * 100.0,
+            if has_healthy_peer { "yes" } else { "no" },
+            health_status,
             tip_hash
         ),
     );
@@ -346,6 +350,66 @@ fn print_runtime_status_tick(data_dir: &str) {
 
 fn admin_rpc_bind_is_allowed(bind: &str) -> bool {
     bind.trim() == "127.0.0.1"
+}
+
+fn validate_conf_admin_rpc_bind(conf: &duta_core::netparams::Conf) -> Result<(), String> {
+    if let Some(raw) = conf
+        .get_last("rpcconnect")
+        .or_else(|| conf.get_last("rpcbind"))
+    {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && trimmed.contains(':') {
+            return Err(format!("invalid_admin_rpc_bind: {}", trimmed));
+        }
+    }
+    Ok(())
+}
+
+fn validate_locked_bind_override(raw: &str, expected_port: u16, what: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if let Some((host, port)) = trimmed.split_once(':') {
+        if host.trim().is_empty() {
+            return Err(format!("invalid_{}: {}", what, trimmed));
+        }
+        let parsed = port
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("invalid_{}: {}", what, trimmed))?;
+        if parsed != expected_port {
+            return Err(format!("invalid_{}: {}", what, trimmed));
+        }
+    }
+    Ok(())
+}
+
+fn validate_conf_listener_binds(
+    net: Network,
+    conf: &duta_core::netparams::Conf,
+) -> Result<(), String> {
+    if let Some(raw) = conf.get_last("bind") {
+        validate_locked_bind_override(&raw, net.default_p2p_port(), "p2p_bind")?;
+    }
+    if let Some(raw) = conf
+        .get_last("mining_bind")
+        .or_else(|| conf.get_last("miningbind"))
+        .or_else(|| conf.get_last("miningaddr"))
+    {
+        validate_locked_bind_override(&raw, net.default_p2p_port().saturating_add(3), "mining_bind")?;
+    }
+    Ok(())
+}
+
+fn load_runtime_conf(conf_path: &str, required: bool) -> Result<duta_core::netparams::Conf, String> {
+    match fs::read_to_string(conf_path) {
+        Ok(s) => Ok(duta_core::netparams::Conf::parse(&s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => {
+            Ok(duta_core::netparams::Conf::default())
+        }
+        Err(e) => Err(format!("config_read_failed: path={} err={}", conf_path, e)),
+    }
 }
 
 fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
@@ -648,6 +712,16 @@ fn normalize_path_maybe_home(s: &str) -> String {
     out
 }
 
+fn validate_conf_network_name(conf: &duta_core::netparams::Conf) -> Result<(), String> {
+    if let Some(raw) = conf.get_last("network").or_else(|| conf.get_last("chain")) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && Network::parse_name(trimmed).is_none() {
+            return Err(format!("invalid_network_name: {}", trimmed));
+        }
+    }
+    Ok(())
+}
+
 fn process_exists(pid: i32) -> bool {
     if pid <= 1 {
         return false;
@@ -680,7 +754,33 @@ fn process_exists(pid: i32) -> bool {
     }
 }
 
-fn http_health_ready(rpc_addr: &str) -> Result<bool, String> {
+fn pid_matches_dutad_process(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+
+    #[cfg(windows)]
+    {
+        return std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.to_ascii_lowercase().contains("dutad"))
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let cmdline_path = format!("/proc/{}/cmdline", pid);
+        fs::read(&cmdline_path)
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_ascii_lowercase().contains("dutad"))
+            .unwrap_or(false)
+    }
+}
+
+fn http_health_status(rpc_addr: &str) -> Result<u16, String> {
     let mut stream =
         TcpStream::connect(rpc_addr).map_err(|e| format!("connect {} failed: {}", rpc_addr, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
@@ -704,7 +804,31 @@ fn http_health_ready(rpc_addr: &str) -> Result<bool, String> {
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| "health_status_missing".to_string())?;
-    Ok(status == 200)
+    Ok(status)
+}
+
+fn http_health_reachable(rpc_addr: &str) -> bool {
+    http_health_status(rpc_addr).map(|status| status > 0).unwrap_or(false)
+}
+
+fn daemon_health_state(
+    tip_height: u64,
+    best_seen_height: u64,
+    has_healthy_peer: bool,
+) -> (bool, &'static str, f64) {
+    let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
+        1.0
+    } else {
+        tip_height as f64 / best_seen_height as f64
+    };
+    if !has_healthy_peer {
+        return (false, "no_peers", sync_progress);
+    }
+    if tip_height >= best_seen_height {
+        (true, "ready", sync_progress)
+    } else {
+        (false, "syncing", sync_progress)
+    }
 }
 
 fn terminate_process(pid: i32) -> bool {
@@ -716,6 +840,8 @@ fn terminate_process(pid: i32) -> bool {
     {
         let soft = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -724,6 +850,8 @@ fn terminate_process(pid: i32) -> bool {
         }
         std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
@@ -763,7 +891,7 @@ fn stop_daemon(data_dir: &str) -> i32 {
         }
     };
 
-    if !process_exists(pid) {
+    if !process_exists(pid) || !pid_matches_dutad_process(pid) {
         // Stale pid file: remove it so next start works cleanly.
         let _ = fs::remove_file(&pid_path);
         eprintln!(
@@ -796,7 +924,7 @@ fn stop_daemon(data_dir: &str) -> i32 {
 
 fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
     let pid_path = format!("{}/dutad.pid", data_dir.trim_end_matches('/'));
-    let rpc_reachable = http_health_ready(rpc_addr).unwrap_or(false);
+    let rpc_reachable = http_health_reachable(rpc_addr);
     let pid_s = match fs::read_to_string(&pid_path) {
         Ok(s) => s,
         Err(_) => {
@@ -834,7 +962,7 @@ fn daemon_status(data_dir: &str, rpc_addr: &str) -> i32 {
             }
         }
     };
-    if process_exists(pid) {
+    if process_exists(pid) && pid_matches_dutad_process(pid) {
         println!("dutad: running");
         println!("pid: {}", pid);
         println!("rpc: {}", rpc_addr);
@@ -872,9 +1000,9 @@ fn wait_for_daemon_rpc_ready(
         if !process_exists(child_pid as i32) {
             return Err(format!("daemon_exited_early: pid={}", child_pid));
         }
-        match http_health_ready(rpc_addr) {
-            Ok(true) => return Ok(()),
-            Ok(false) => last_err = "health_not_ready".to_string(),
+        match http_health_status(rpc_addr) {
+            Ok(status) if status > 0 => return Ok(()),
+            Ok(_) => last_err = "health_not_reachable".to_string(),
             Err(e) => last_err = e,
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -909,7 +1037,7 @@ fn maybe_daemonize(args: &Args, data_dir: &str, rpc_addr: &str) {
 
     if let Ok(pid_s) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_s.trim().parse::<i32>() {
-            if pid > 1 && process_exists(pid) {
+            if pid > 1 && process_exists(pid) && pid_matches_dutad_process(pid) {
                 eprintln!("dutad: already running (pid={})", pid);
                 std::process::exit(1);
             }
@@ -1444,12 +1572,9 @@ fn start_rpc_servers(
                     let (tip_height, _tip_hash, _tip_cw, _tip_bits) =
                         store::tip_fields(&data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
                     let best_seen_height = p2p::best_seen_height().max(tip_height);
-                    let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
-                        1.0
-                    } else {
-                        tip_height as f64 / best_seen_height as f64
-                    };
-                    let is_ready = best_seen_height == 0 || sync_progress >= 0.99;
+                    let has_healthy_peer = p2p::bootstrap_has_healthy_peer();
+                    let (is_ready, health_status, sync_progress) =
+                        daemon_health_state(tip_height, best_seen_height, has_healthy_peer);
                     let status = if is_ready {
                         tiny_http::StatusCode(200)
                     } else {
@@ -1460,11 +1585,12 @@ fn start_rpc_servers(
                         status,
                         json!({
                             "ok": is_ready,
-                            "status": if is_ready { "ready" } else { "syncing" },
+                            "status": health_status,
                             "net": net_str.as_str(),
                             "version": env!("CARGO_PKG_VERSION"),
                             "tip_height": tip_height,
-                            "sync_progress": sync_progress
+                            "sync_progress": sync_progress,
+                            "peer_ready": has_healthy_peer
                         })
                         .to_string(),
                     );
@@ -1935,8 +2061,24 @@ fn main() {
             conf_path = cp2;
         }
     }
-    if let Ok(s) = fs::read_to_string(&conf_path) {
-        conf = duta_core::netparams::Conf::parse(&s);
+    match load_runtime_conf(&conf_path, args.conf.is_some()) {
+        Ok(parsed) => conf = parsed,
+        Err(e) => {
+            eprintln!("dutad: {}", e);
+            std::process::exit(1);
+        }
+    }
+    if let Err(e) = validate_conf_network_name(&conf) {
+        eprintln!("dutad: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = validate_conf_admin_rpc_bind(&conf) {
+        eprintln!("dutad: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = validate_conf_listener_binds(net, &conf) {
+        eprintln!("dutad: {}", e);
+        std::process::exit(1);
     }
 
     if cli_net.is_none() {
@@ -1977,8 +2119,24 @@ fn main() {
                 }
                 if args.conf.is_none() {
                     conf_path = format!("{}/duta.conf", data_dir.trim_end_matches('/'));
-                    if let Ok(s) = fs::read_to_string(&conf_path) {
-                        conf = duta_core::netparams::Conf::parse(&s);
+                    match load_runtime_conf(&conf_path, args.conf.is_some()) {
+                        Ok(parsed) => conf = parsed,
+                        Err(e) => {
+                            eprintln!("dutad: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    if let Err(e) = validate_conf_network_name(&conf) {
+                        eprintln!("dutad: {}", e);
+                        std::process::exit(1);
+                    }
+                    if let Err(e) = validate_conf_admin_rpc_bind(&conf) {
+                        eprintln!("dutad: {}", e);
+                        std::process::exit(1);
+                    }
+                    if let Err(e) = validate_conf_listener_binds(net, &conf) {
+                        eprintln!("dutad: {}", e);
+                        std::process::exit(1);
                     }
                     if let Some(dd) = conf.get_last("datadir") {
                         let dd2 = normalize_path_maybe_home(&dd);
@@ -2004,6 +2162,18 @@ fn main() {
                 }
                 if let Ok(s) = fs::read_to_string(&conf_path) {
                     conf = duta_core::netparams::Conf::parse(&s);
+                }
+                if let Err(e) = validate_conf_network_name(&conf) {
+                    eprintln!("dutad: {}", e);
+                    std::process::exit(1);
+                }
+                if let Err(e) = validate_conf_admin_rpc_bind(&conf) {
+                    eprintln!("dutad: {}", e);
+                    std::process::exit(1);
+                }
+                if let Err(e) = validate_conf_listener_binds(net, &conf) {
+                    eprintln!("dutad: {}", e);
+                    std::process::exit(1);
                 }
             }
         }
@@ -2267,12 +2437,15 @@ fn main() {
 mod tests {
     use super::{
         admin_path_requires_loopback, blocks_from_json, ip_is_loopback_or_private,
+        daemon_health_state, load_runtime_conf,
         per_ip_rate_limit, Args, ChainBlock, SUBMIT_MAX_PER_IP_PER_SEC,
         WORK_MAX_PER_PRIVATE_IP_PER_SEC,
     };
     use crate::store;
     use clap::Parser;
+    use duta_core::Network;
     use serde_json::json;
+    use std::fs;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -2303,6 +2476,38 @@ mod tests {
                 "path should stay public/query-only: {path}"
             );
         }
+    }
+
+    #[test]
+    fn daemon_health_requires_healthy_peer_before_ready() {
+        let (ok, status, sync) = daemon_health_state(0, 0, false);
+        assert!(!ok);
+        assert_eq!(status, "no_peers");
+        assert_eq!(sync, 1.0);
+    }
+
+    #[test]
+    fn daemon_health_reports_ready_once_peer_is_healthy_and_synced() {
+        let (ok, status, sync) = daemon_health_state(100, 100, true);
+        assert!(ok);
+        assert_eq!(status, "ready");
+        assert_eq!(sync, 1.0);
+    }
+
+    #[test]
+    fn daemon_health_reports_syncing_when_peer_is_ahead() {
+        let (ok, status, sync) = daemon_health_state(80, 100, true);
+        assert!(!ok);
+        assert_eq!(status, "syncing");
+        assert!(sync < 1.0);
+    }
+
+    #[test]
+    fn daemon_health_stays_syncing_when_only_slightly_behind_best_seen_tip() {
+        let (ok, status, sync) = daemon_health_state(268, 270, true);
+        assert!(!ok);
+        assert_eq!(status, "syncing");
+        assert!(sync < 1.0);
     }
 
     #[test]
@@ -2418,5 +2623,138 @@ mod tests {
 
         let _ = handle.join();
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn daemon_status_treats_503_health_without_pid_file_as_running() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 33\r\n\r\n{\"ok\":false,\"status\":\"no_peers\"}",
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        let data_dir = temp_datadir("daemon-status-rpc-503");
+        let rc = super::daemon_status(&data_dir, &addr.to_string());
+        assert_eq!(rc, 0);
+
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_matches_dutad_process_rejects_foreign_live_pid() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+        assert!(super::process_exists(pid));
+        assert!(!super::pid_matches_dutad_process(pid));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn runtime_config_rejects_unknown_network_name() {
+        let conf = duta_core::netparams::Conf::parse("network=bogus\n");
+        assert_eq!(
+            super::validate_conf_network_name(&conf).unwrap_err(),
+            "invalid_network_name: bogus"
+        );
+        let ok = duta_core::netparams::Conf::parse("network=testnet\n");
+        assert!(super::validate_conf_network_name(&ok).is_ok());
+    }
+
+    #[test]
+    fn runtime_config_rejects_admin_rpc_bind_with_port() {
+        let conf = duta_core::netparams::Conf::parse("rpcbind=127.0.0.1:notaport\n");
+        assert_eq!(
+            super::validate_conf_admin_rpc_bind(&conf).unwrap_err(),
+            "invalid_admin_rpc_bind: 127.0.0.1:notaport"
+        );
+        let ok = duta_core::netparams::Conf::parse("rpcbind=127.0.0.1\n");
+        assert!(super::validate_conf_admin_rpc_bind(&ok).is_ok());
+    }
+
+    #[test]
+    fn runtime_config_rejects_invalid_p2p_and_mining_bind_ports() {
+        let bad_p2p = duta_core::netparams::Conf::parse("bind=0.0.0.0:notaport\n");
+        assert_eq!(
+            super::validate_conf_listener_binds(Network::Testnet, &bad_p2p).unwrap_err(),
+            "invalid_p2p_bind: 0.0.0.0:notaport"
+        );
+        let bad_mining = duta_core::netparams::Conf::parse("miningbind=0.0.0.0:notaport\n");
+        assert_eq!(
+            super::validate_conf_listener_binds(Network::Testnet, &bad_mining).unwrap_err(),
+            "invalid_mining_bind: 0.0.0.0:notaport"
+        );
+        let ok = duta_core::netparams::Conf::parse("bind=0.0.0.0:18082\nminingbind=0.0.0.0:18085\n");
+        assert!(super::validate_conf_listener_binds(Network::Testnet, &ok).is_ok());
+    }
+
+    #[test]
+    fn load_runtime_conf_returns_default_when_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "dutad-load-runtime-conf-missing-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("missing.conf");
+        let conf = load_runtime_conf(path.to_str().unwrap(), false).unwrap();
+        assert!(conf.get_last("network").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn load_runtime_conf_fails_when_existing_file_is_unreadable() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "dutad-load-runtime-conf-unreadable-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("duta.conf");
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            writeln!(f, "network=testnet").unwrap();
+        }
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&path, perms).unwrap();
+        let err = load_runtime_conf(path.to_str().unwrap(), false).unwrap_err();
+        assert!(err.contains("config_read_failed"));
+        let mut cleanup_perms = fs::metadata(&path).unwrap().permissions();
+        cleanup_perms.set_mode(0o644);
+        let _ = fs::set_permissions(&path, cleanup_perms);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_runtime_conf_fails_when_explicit_path_is_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "dutad-load-runtime-conf-required-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("missing-required.conf");
+        let err = load_runtime_conf(path.to_str().unwrap(), true).unwrap_err();
+        assert!(err.contains("config_read_failed"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
