@@ -39,19 +39,19 @@ From the repository root:
 
 ```bash
 chmod +x ./tools/build_release_bundle.sh
-./tools/build_release_bundle.sh 1.0.0
+./tools/build_release_bundle.sh 1.0.1
 ```
 
 The bundle will be created in:
 
 ```text
-dist/duta-release-1.0.0-linux-x86_64
+dist/duta-release-1.0.1-linux-x86_64
 ```
 
 A compressed archive will also be created:
 
 ```text
-dist/duta-release-1.0.0-linux-x86_64.tar.gz
+dist/duta-release-1.0.1-linux-x86_64.tar.gz
 ```
 
 ## Build for another Linux target
@@ -60,7 +60,7 @@ Example with musl:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
-./tools/build_release_bundle.sh 1.0.0 x86_64-unknown-linux-musl
+./tools/build_release_bundle.sh 1.0.1 x86_64-unknown-linux-musl
 ```
 
 ## Quick verification
@@ -68,9 +68,9 @@ rustup target add x86_64-unknown-linux-musl
 After the bundle is built, test the binaries directly:
 
 ```bash
-./dist/duta-release-1.0.0-linux-x86_64/dutad --help
-./dist/duta-release-1.0.0-linux-x86_64/duta-cli --help
-./dist/duta-release-1.0.0-linux-x86_64/dutaminer --help
+./dist/duta-release-1.0.1-linux-x86_64/dutad --help
+./dist/duta-release-1.0.1-linux-x86_64/duta-cli --help
+./dist/duta-release-1.0.1-linux-x86_64/dutaminer --help
 ```
 
 ## Suggested release checklist
@@ -82,4 +82,4 @@ Before publishing a Linux release:
 - verify the main binaries start and print help output
 - check `sha256sums.txt`
 - keep daemon admin RPC private by default in deployment docs
-- label the release clearly as `1.0.0`
+- label the release clearly as `1.0.1`

@@ -53,6 +53,6 @@ If a checksum file is attached to the release, verify it before running the bina
 ## Archive note
 
 This beta package note is preserved for historical reference only.
-For current operator guidance, use the final `1.0.0` release and deployment documents in this repository.
+For current operator guidance, use the final `1.0.1` release and deployment documents in this repository.
 
 For build, deployment, and security notes, see the repository documentation.

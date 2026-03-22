@@ -43,8 +43,8 @@ Compare the output to `sha256sums.txt`.
 Extract the archive:
 
 ```bash
-tar -xzf duta-release-1.0.0-linux-x86_64.tar.gz
-cd duta-release-1.0.0-linux-x86_64
+tar -xzf duta-release-1.0.1-linux-x86_64.tar.gz
+cd duta-release-1.0.1-linux-x86_64
 ```
 
 Install the binaries:
