@@ -6,9 +6,9 @@ use duta_core::dutahash;
 use duta_core::hash;
 use duta_core::netparams;
 use duta_core::netparams::{
-    devfee_addrs, devfee_bps, genesis_hash, pow_launch_difficulty_hardening_enabled,
-    pow_bootstrap_sync_recent_span, pow_max_bits, pow_min_bits, pow_retarget_window, pow_start_bits,
-    pow_target_secs, Network,
+    devfee_addrs, devfee_bps, genesis_hash, pow_bootstrap_sync_recent_span,
+    pow_launch_difficulty_hardening_enabled, pow_max_bits, pow_min_bits, pow_retarget_window,
+    pow_start_bits, pow_target_secs, Network,
 };
 use duta_core::types::H32;
 use serde::{Deserialize, Serialize};
@@ -1793,12 +1793,9 @@ pub fn utxos_for_addresses(
         let vout = vout_s
             .parse::<u64>()
             .map_err(|e| format!("utxo_key_invalid_vout: {}", e))?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("utxo_decode_failed: {}", e))?;
-        let pkh = value
-            .get("pkh")
-            .and_then(|x| x.as_str())
-            .unwrap_or("");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("utxo_decode_failed: {}", e))?;
+        let pkh = value.get("pkh").and_then(|x| x.as_str()).unwrap_or("");
         let Some(address) = target_by_pkh.get(pkh) else {
             continue;
         };
@@ -1811,7 +1808,14 @@ pub fn utxos_for_addresses(
             .get("is_coinbase")
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
-        out.push((txid.to_string(), vout, amount, height, coinbase, address.clone()));
+        out.push((
+            txid.to_string(),
+            vout,
+            amount,
+            height,
+            coinbase,
+            address.clone(),
+        ));
     }
 
     out.sort_by(|a, b| (a.0.clone(), a.1).cmp(&(b.0.clone(), b.1)));
@@ -1938,7 +1942,15 @@ mod tests_a5 {
         let pkh_b = address::pkh_to_hex(&address::parse_address(&addr_b).unwrap());
         put_utxo_with_pkh(&utxo, "aa", 0, 50, 100, false, &pkh_a);
         put_utxo_with_pkh(&utxo, "bb", 1, 75, 101, true, &pkh_b);
-        put_utxo_with_pkh(&utxo, "cc", 2, 99, 102, false, "3333333333333333333333333333333333333333");
+        put_utxo_with_pkh(
+            &utxo,
+            "cc",
+            2,
+            99,
+            102,
+            false,
+            "3333333333333333333333333333333333333333",
+        );
         utxo.flush().unwrap();
         db.flush().unwrap();
         drop(utxo);
@@ -2503,4 +2515,3 @@ mod tests_a5 {
         );
     }
 }
-

@@ -475,7 +475,8 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 ));
                 return;
             }
-            if reason == "stale" || v.get("reject_reason").and_then(|x| x.as_str()) == Some("stale") {
+            if reason == "stale" || v.get("reject_reason").and_then(|x| x.as_str()) == Some("stale")
+            {
                 log_err("rejected share: submitted too late");
                 return;
             }
@@ -523,7 +524,10 @@ fn explain_submit_result(http_code: Option<u16>, body: &str, mined_hash32: &str)
                 ));
             } else {
                 if detail.is_empty() {
-                    log_err(format!("rejected share: invalid share hash={}", mined_hash32));
+                    log_err(format!(
+                        "rejected share: invalid share hash={}",
+                        mined_hash32
+                    ));
                 } else {
                     log_err(format!(
                         "rejected share: invalid share ({}) hash={}",
@@ -763,7 +767,10 @@ fn main() -> Result<(), String> {
             let ds = dutahash::build_dataset_for_epoch(w.epoch, anchor, w.mem_mb);
             cached_dataset = Arc::new(ds);
             cache_key = Some(key);
-            log_miner(format!("dataset built: epoch={} mem_mb={}", w.epoch, w.mem_mb));
+            log_miner(format!(
+                "dataset built: epoch={} mem_mb={}",
+                w.epoch, w.mem_mb
+            ));
         }
 
         // Assemble canonical header bytes used by daemon's remote-mining implementation:
@@ -944,4 +951,3 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 }
-

@@ -149,9 +149,7 @@ fn submit_reason_message(reason: &str) -> String {
         "work_mismatch" => {
             "Share rejected: work mismatch (chain tip changed). Please fetch new work.".to_string()
         }
-        "sync_gate" => {
-            "Share rejected: waiting sync.".to_string()
-        }
+        "sync_gate" => "Share rejected: waiting sync.".to_string(),
         "syncing" => "Share rejected: waiting sync.".to_string(),
         "busy" => "Share rejected: node is busy. Please retry shortly.".to_string(),
         "low_difficulty" => "Share rejected: low difficulty (does not meet target).".to_string(),
@@ -600,24 +598,23 @@ pub fn handle_submit_work(
         }
     };
 
-    let accepted =
-                match accept_mined_block_with_source(data_dir, &mined_block, stratum_source) {
-            Ok(v) => v,
-            Err(e) => {
-                let detail = e.clone();
-                let reason = canonical_submit_reason(&detail);
-                let (status, body) = submit_reject_body(&detail);
-                edlog!(
-                    "[dutad] BLOCK_REJECT work={} reason={} detail={}",
-                    short_id(work_id),
-                    reason,
-                    detail
-                );
-                cache_submit_result(work_id, nonce, status, &body);
-                respond_json(request, tiny_http::StatusCode(status), body);
-                return;
-            }
-        };
+    let accepted = match accept_mined_block_with_source(data_dir, &mined_block, stratum_source) {
+        Ok(v) => v,
+        Err(e) => {
+            let detail = e.clone();
+            let reason = canonical_submit_reason(&detail);
+            let (status, body) = submit_reject_body(&detail);
+            edlog!(
+                "[dutad] BLOCK_REJECT work={} reason={} detail={}",
+                short_id(work_id),
+                reason,
+                detail
+            );
+            cache_submit_result(work_id, nonce, status, &body);
+            respond_json(request, tiny_http::StatusCode(status), body);
+            return;
+        }
+    };
 
     let body = accepted.to_string();
 
@@ -777,4 +774,3 @@ mod tests {
         assert!(sanitize_mempool_value(&mp).is_none());
     }
 }
-

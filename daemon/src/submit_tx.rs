@@ -5,8 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::canon_json;
 use crate::store;
-use duta_core::amount::{DEFAULT_MIN_OUTPUT_VALUE_DUT, DEFAULT_MIN_RELAY_FEE_PER_KB_DUT};
 use duta_core::address;
+use duta_core::amount::{DEFAULT_MIN_OUTPUT_VALUE_DUT, DEFAULT_MIN_RELAY_FEE_PER_KB_DUT};
 use duta_core::hash;
 use ed25519_dalek::{Signature, VerifyingKey};
 

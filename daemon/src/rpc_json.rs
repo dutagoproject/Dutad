@@ -1446,7 +1446,9 @@ mod tests {
     #[test]
     fn rpc_info_exposes_display_and_base_unit_metadata() {
         let out = handle_rpc(
-            json!({"id":1,"method":"getinfo","params":[]}).to_string().as_bytes(),
+            json!({"id":1,"method":"getinfo","params":[]})
+                .to_string()
+                .as_bytes(),
             "C:/dutaproject/testnet",
             "testnet",
         )
@@ -1458,7 +1460,10 @@ mod tests {
             result.get("display_unit").and_then(|x| x.as_str()),
             Some("DUTA")
         );
-        assert_eq!(result.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
+        assert_eq!(
+            result.get("base_unit").and_then(|x| x.as_str()),
+            Some("dut")
+        );
         assert_eq!(result.get("decimals").and_then(|x| x.as_u64()), Some(8));
     }
 
@@ -1479,13 +1484,19 @@ mod tests {
             result.get("display_unit").and_then(|x| x.as_str()),
             Some("DUTA")
         );
-        assert_eq!(result.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
+        assert_eq!(
+            result.get("base_unit").and_then(|x| x.as_str()),
+            Some("dut")
+        );
         assert_eq!(result.get("decimals").and_then(|x| x.as_u64()), Some(8));
         assert_eq!(
             result.get("relayfee").and_then(|x| x.as_str()),
             Some("0.00010000")
         );
-        assert_eq!(result.get("relayfee_dut").and_then(|x| x.as_u64()), Some(10_000));
+        assert_eq!(
+            result.get("relayfee_dut").and_then(|x| x.as_u64()),
+            Some(10_000)
+        );
     }
 
     #[test]
@@ -1563,4 +1574,3 @@ mod tests {
         );
     }
 }
-

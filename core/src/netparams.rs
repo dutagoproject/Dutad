@@ -192,8 +192,10 @@ pub fn pow_bootstrap_sync_recent_span(net: Network) -> u64 {
 
 pub fn pow_bootstrap_sync_enabled(net: Network, _next_height: u64, _current_bits: u64) -> bool {
     match net {
-        Network::Mainnet => _next_height <= pow_bootstrap_sync_until_height(net)
-            && _current_bits < pow_bootstrap_sync_target_bits(net),
+        Network::Mainnet => {
+            _next_height <= pow_bootstrap_sync_until_height(net)
+                && _current_bits < pow_bootstrap_sync_target_bits(net)
+        }
         Network::Testnet | Network::Stagenet => false,
     }
 }
@@ -386,4 +388,3 @@ mod tests {
         assert_eq!(devfee_bps(Network::Mainnet, year * 2), DEVFEE_BPS_STEADY);
     }
 }
-

@@ -161,8 +161,11 @@ fn template_tx_for_block(txv: &serde_json::Value) -> serde_json::Value {
 
 fn write_mempool_value(data_dir: &str, v: &serde_json::Value) -> Result<(), String> {
     let path = format!("{}/mempool.json", data_dir.trim_end_matches('/'));
-    fs::write(&path, serde_json::to_vec(v).map_err(|e| format!("json_encode_failed: {}", e))?)
-        .map_err(|e| format!("mempool_write_failed: {}", e))
+    fs::write(
+        &path,
+        serde_json::to_vec(v).map_err(|e| format!("json_encode_failed: {}", e))?,
+    )
+    .map_err(|e| format!("mempool_write_failed: {}", e))
 }
 
 fn filter_template_mempool(
@@ -574,7 +577,11 @@ fn stratum_work_scope(miner: &str, worker: &str) -> String {
     format!("{}#{}", miner, worker)
 }
 
-fn request_work_scope(request: &tiny_http::Request, miner: &str, stratum_pool_bypass: bool) -> String {
+fn request_work_scope(
+    request: &tiny_http::Request,
+    miner: &str,
+    stratum_pool_bypass: bool,
+) -> String {
     if stratum_pool_bypass {
         if let Some(worker) = request
             .headers()
@@ -720,9 +727,8 @@ pub(crate) fn insert_test_work(work_id: &str, item: WorkItem) {
 #[cfg(test)]
 mod tests {
     use super::{
-        block_subsidy, mining_address_is_valid,
-        mining_address_is_valid_for_network, net_from_datadir, sanitize_mempool_value,
-        stratum_work_scope, template_tx_for_block,
+        block_subsidy, mining_address_is_valid, mining_address_is_valid_for_network,
+        net_from_datadir, sanitize_mempool_value, stratum_work_scope, template_tx_for_block,
     };
     use crate::store;
     use duta_core::amount::DUT_PER_DUTA;

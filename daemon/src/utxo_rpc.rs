@@ -178,7 +178,8 @@ pub fn handle_wallet_utxos(
             respond_json(
                 request,
                 tiny_http::StatusCode(400),
-                json!({"ok":false,"error":"bad_request","detail":"addresses_must_be_strings"}).to_string(),
+                json!({"ok":false,"error":"bad_request","detail":"addresses_must_be_strings"})
+                    .to_string(),
             );
             return;
         };
@@ -187,15 +188,24 @@ pub fn handle_wallet_utxos(
         }
     }
     if addresses.is_empty() {
-        let tip_height = store::tip_fields(data_dir).map(|(h, _, _, _)| h).unwrap_or(0);
-        let body = wallet_utxo_snapshot_response_json(tip_height, store::prune_below(data_dir), Vec::new());
+        let tip_height = store::tip_fields(data_dir)
+            .map(|(h, _, _, _)| h)
+            .unwrap_or(0);
+        let body = wallet_utxo_snapshot_response_json(
+            tip_height,
+            store::prune_below(data_dir),
+            Vec::new(),
+        );
         respond_json(request, tiny_http::StatusCode(200), body.to_string());
         return;
     }
     match store::utxos_for_addresses(data_dir, &addresses) {
         Ok(utxos) => {
-            let tip_height = store::tip_fields(data_dir).map(|(h, _, _, _)| h).unwrap_or(0);
-            let body = wallet_utxo_snapshot_response_json(tip_height, store::prune_below(data_dir), utxos);
+            let tip_height = store::tip_fields(data_dir)
+                .map(|(h, _, _, _)| h)
+                .unwrap_or(0);
+            let body =
+                wallet_utxo_snapshot_response_json(tip_height, store::prune_below(data_dir), utxos);
             respond_json(request, tiny_http::StatusCode(200), body.to_string());
         }
         Err(detail) => respond_json(
@@ -253,11 +263,20 @@ mod tests {
     #[test]
     fn utxo_response_uses_display_amount_and_raw_base_unit_side_by_side() {
         let body = utxo_response_json("ab", 1, Some((1, 22, false, "pkh".to_string())));
-        assert_eq!(body.get("amount").and_then(|x| x.as_str()), Some("0.00000001"));
-        assert_eq!(body.get("amount_display").and_then(|x| x.as_str()), Some("0.00000001"));
+        assert_eq!(
+            body.get("amount").and_then(|x| x.as_str()),
+            Some("0.00000001")
+        );
+        assert_eq!(
+            body.get("amount_display").and_then(|x| x.as_str()),
+            Some("0.00000001")
+        );
         assert_eq!(body.get("amount_dut").and_then(|x| x.as_u64()), Some(1));
         assert_eq!(body.get("unit").and_then(|x| x.as_str()), Some("DUTA"));
-        assert_eq!(body.get("display_unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(
+            body.get("display_unit").and_then(|x| x.as_str()),
+            Some("DUTA")
+        );
         assert_eq!(body.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
         assert_eq!(body.get("decimals").and_then(|x| x.as_u64()), Some(8));
     }
@@ -265,12 +284,18 @@ mod tests {
     #[test]
     fn utxo_response_keeps_fixed_eight_decimal_display_amounts() {
         let body = utxo_response_json("ab", 1, Some((10_000, 22, false, "pkh".to_string())));
-        assert_eq!(body.get("amount").and_then(|x| x.as_str()), Some("0.00010000"));
+        assert_eq!(
+            body.get("amount").and_then(|x| x.as_str()),
+            Some("0.00010000")
+        );
         assert_eq!(
             body.get("amount_display").and_then(|x| x.as_str()),
             Some("0.00010000")
         );
-        assert_eq!(body.get("amount_dut").and_then(|x| x.as_u64()), Some(10_000));
+        assert_eq!(
+            body.get("amount_dut").and_then(|x| x.as_u64()),
+            Some(10_000)
+        );
     }
 
     #[test]
@@ -278,7 +303,10 @@ mod tests {
         let body = utxo_response_json("ab", 2, None);
         assert_eq!(body.get("found").and_then(|x| x.as_bool()), Some(false));
         assert_eq!(body.get("unit").and_then(|x| x.as_str()), Some("DUTA"));
-        assert_eq!(body.get("display_unit").and_then(|x| x.as_str()), Some("DUTA"));
+        assert_eq!(
+            body.get("display_unit").and_then(|x| x.as_str()),
+            Some("DUTA")
+        );
         assert_eq!(body.get("base_unit").and_then(|x| x.as_str()), Some("dut"));
         assert_eq!(body.get("decimals").and_then(|x| x.as_u64()), Some(8));
     }
@@ -302,8 +330,17 @@ mod tests {
         assert_eq!(body.get("prune_below").and_then(|x| x.as_u64()), Some(55));
         let utxos = body.get("utxos").and_then(|x| x.as_array()).unwrap();
         assert_eq!(utxos.len(), 1);
-        assert_eq!(utxos[0].get("amount").and_then(|x| x.as_str()), Some("0.00010000"));
-        assert_eq!(utxos[0].get("amount_dut").and_then(|x| x.as_u64()), Some(10_000));
-        assert_eq!(utxos[0].get("coinbase").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(
+            utxos[0].get("amount").and_then(|x| x.as_str()),
+            Some("0.00010000")
+        );
+        assert_eq!(
+            utxos[0].get("amount_dut").and_then(|x| x.as_u64()),
+            Some(10_000)
+        );
+        assert_eq!(
+            utxos[0].get("coinbase").and_then(|x| x.as_bool()),
+            Some(false)
+        );
     }
 }

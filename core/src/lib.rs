@@ -23,8 +23,8 @@ pub use address::{
 pub use amount::{
     format_dut_i64, format_dut_u64, parse_duta_to_dut_i64, AmountUnits, AMOUNT_UNITS, BASE_UNIT,
     DEFAULT_DUST_CHANGE_DUT, DEFAULT_MAX_WALLET_FEE_DUT, DEFAULT_MIN_OUTPUT_VALUE_DUT,
-    DEFAULT_MIN_RELAY_FEE_PER_KB_DUT, DEFAULT_WALLET_FEE_DUT, DISPLAY_UNIT, DUT_PER_DUTA,
-    DUT_PER_DUTA_I64, DUTA_DECIMALS,
+    DEFAULT_MIN_RELAY_FEE_PER_KB_DUT, DEFAULT_WALLET_FEE_DUT, DISPLAY_UNIT, DUTA_DECIMALS,
+    DUT_PER_DUTA, DUT_PER_DUTA_I64,
 };
 pub use netparams::{dev_fee_address, devfee_addrs, devfee_bps, Conf, Network};
 pub use types::H32;
