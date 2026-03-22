@@ -281,8 +281,16 @@ fn print_chain_status(data_dir: &str) {
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
     let best_seen_height = p2p::best_seen_height().max(tip_height);
     let has_healthy_peer = p2p::bootstrap_has_healthy_peer();
-    let (_is_ready, health_status, sync_progress) =
-        daemon_health_state(tip_height, best_seen_height, has_healthy_peer);
+    let sync_gate_detail = p2p::p2p_public_info()
+        .get("sync_gate_detail")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let (_is_ready, health_status, sync_progress) = daemon_health_state(
+        tip_height,
+        best_seen_height,
+        has_healthy_peer,
+        sync_gate_detail.as_deref(),
+    );
     console_line(
         "CHAIN",
         ANSI_YELLOW,
@@ -325,13 +333,47 @@ fn print_startup_guidance(rpc_addr: &str) {
     println!();
 }
 
+struct BoundRpcServers {
+    rpc_server: tiny_http::Server,
+    mining_server: Option<(String, tiny_http::Server)>,
+}
+
+fn bind_rpc_servers(
+    rpc_addr: &str,
+    mining_addr: Option<&str>,
+) -> Result<BoundRpcServers, String> {
+    let rpc_server = tiny_http::Server::http(rpc_addr)
+        .map_err(|e| format!("RPC_BIND_FAIL addr={} err={}", rpc_addr, e))?;
+
+    let mining_server = if let Some(mining_addr) = mining_addr {
+        let server = tiny_http::Server::http(mining_addr)
+            .map_err(|e| format!("MINING_BIND_FAIL addr={} err={}", mining_addr, e))?;
+        Some((mining_addr.to_string(), server))
+    } else {
+        None
+    };
+
+    Ok(BoundRpcServers {
+        rpc_server,
+        mining_server,
+    })
+}
+
 fn print_runtime_status_tick(data_dir: &str) {
     let (tip_height, tip_hash, _tip_chainwork, bits) =
         store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
     let best_seen_height = p2p::best_seen_height().max(tip_height);
     let has_healthy_peer = p2p::bootstrap_has_healthy_peer();
-    let (_is_ready, health_status, sync_progress) =
-        daemon_health_state(tip_height, best_seen_height, has_healthy_peer);
+    let sync_gate_detail = p2p::p2p_public_info()
+        .get("sync_gate_detail")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let (_is_ready, health_status, sync_progress) = daemon_health_state(
+        tip_height,
+        best_seen_height,
+        has_healthy_peer,
+        sync_gate_detail.as_deref(),
+    );
     console_line(
         "STATUS",
         ANSI_CYAN,
@@ -397,12 +439,19 @@ fn validate_conf_listener_binds(
         .or_else(|| conf.get_last("miningbind"))
         .or_else(|| conf.get_last("miningaddr"))
     {
-        validate_locked_bind_override(&raw, net.default_p2p_port().saturating_add(3), "mining_bind")?;
+        validate_locked_bind_override(
+            &raw,
+            net.default_p2p_port().saturating_add(3),
+            "mining_bind",
+        )?;
     }
     Ok(())
 }
 
-fn load_runtime_conf(conf_path: &str, required: bool) -> Result<duta_core::netparams::Conf, String> {
+fn load_runtime_conf(
+    conf_path: &str,
+    required: bool,
+) -> Result<duta_core::netparams::Conf, String> {
     match fs::read_to_string(conf_path) {
         Ok(s) => Ok(duta_core::netparams::Conf::parse(&s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => {
@@ -775,7 +824,11 @@ fn pid_matches_dutad_process(pid: i32) -> bool {
         let cmdline_path = format!("/proc/{}/cmdline", pid);
         fs::read(&cmdline_path)
             .ok()
-            .map(|bytes| String::from_utf8_lossy(&bytes).to_ascii_lowercase().contains("dutad"))
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .to_ascii_lowercase()
+                    .contains("dutad")
+            })
             .unwrap_or(false)
     }
 }
@@ -808,13 +861,16 @@ fn http_health_status(rpc_addr: &str) -> Result<u16, String> {
 }
 
 fn http_health_reachable(rpc_addr: &str) -> bool {
-    http_health_status(rpc_addr).map(|status| status > 0).unwrap_or(false)
+    http_health_status(rpc_addr)
+        .map(|status| status > 0)
+        .unwrap_or(false)
 }
 
 fn daemon_health_state(
     tip_height: u64,
     best_seen_height: u64,
     has_healthy_peer: bool,
+    sync_gate_detail: Option<&str>,
 ) -> (bool, &'static str, f64) {
     let sync_progress = if best_seen_height == 0 || tip_height >= best_seen_height {
         1.0
@@ -823,6 +879,9 @@ fn daemon_health_state(
     };
     if !has_healthy_peer {
         return (false, "no_peers", sync_progress);
+    }
+    if sync_gate_detail.is_some() {
+        return (false, "syncing", sync_progress);
     }
     if tip_height >= best_seen_height {
         (true, "ready", sync_progress)
@@ -1415,37 +1474,18 @@ fn mempool_json(data_dir: &str) -> String {
 
 fn start_rpc_servers(
     rpc_addr: String,
-    mining_addr: Option<String>,
     data_dir: String,
     net_str: String,
     rollback_enabled: bool,
+    bound: BoundRpcServers,
 ) {
-    let server = match tiny_http::Server::http(&rpc_addr) {
-        Ok(s) => s,
-        Err(e) => {
-            edlog!("daemon: RPC_BIND_FAIL addr={} err={}", rpc_addr, e);
-            return;
-        }
-    };
-
+    let server = bound.rpc_server;
     dlog!("daemon: RPC_LISTEN addr=http://{}", rpc_addr);
 
-    let mining_enabled = mining_addr.is_some();
+    let mining_enabled = bound.mining_server.is_some();
 
     // Phase 3: optional public mining interface on a separate listener.
-    let mining_listener = if let Some(mining_addr) = mining_addr.clone() {
-        let mining_server = match tiny_http::Server::http(&mining_addr) {
-            Ok(s) => s,
-            Err(e) => {
-                edlog!("daemon: MINING_BIND_FAIL addr={} err={}", mining_addr, e);
-                return;
-            }
-        };
-        Some((mining_addr, mining_server))
-    } else {
-        None
-    };
-    if let Some((mining_addr, mining_server)) = mining_listener {
+    if let Some((mining_addr, mining_server)) = bound.mining_server {
         let data_dir2 = data_dir.clone();
         let net_str2 = net_str.clone();
         thread::spawn(move || {
@@ -1586,9 +1626,16 @@ fn start_rpc_servers(
                         .get("persisted_peer_count")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let sync_gate_detail = p2p_info.get("sync_gate_detail").cloned().unwrap_or(json!(null));
-                    let (is_ready, health_status, sync_progress) =
-                        daemon_health_state(tip_height, best_seen_height, has_healthy_peer);
+                    let sync_gate_detail = p2p_info
+                        .get("sync_gate_detail")
+                        .cloned()
+                        .unwrap_or(json!(null));
+                    let (is_ready, health_status, sync_progress) = daemon_health_state(
+                        tip_height,
+                        best_seen_height,
+                        has_healthy_peer,
+                        sync_gate_detail.as_str(),
+                    );
                     let status = if is_ready {
                         tiny_http::StatusCode(200)
                     } else {
@@ -2367,7 +2414,6 @@ fn main() {
     // Start RPC server.
     let data_for_rpc = data_dir.clone();
     let rpc_addr_for_thread = rpc_addr.clone();
-    let mining_addr_for_thread = mining_addr.clone();
     let net_for_rpc = net_str.clone();
     let rollback_enabled = conf
         .get_last("enable_rollback")
@@ -2377,13 +2423,21 @@ fn main() {
         || std::env::var("DUTA_ENABLE_ROLLBACK")
             .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
+    let bound_rpc_servers = match bind_rpc_servers(&rpc_addr, mining_addr.as_deref()) {
+        Ok(bound) => bound,
+        Err(e) => {
+            edlog!("daemon: {}", e);
+            eprintln!("dutad: startup failed: {}", e);
+            std::process::exit(1);
+        }
+    };
     let rpc_thread = thread::spawn(move || {
         start_rpc_servers(
             rpc_addr_for_thread,
-            mining_addr_for_thread,
             data_for_rpc,
             net_for_rpc,
             rollback_enabled,
+            bound_rpc_servers,
         )
     });
 
@@ -2454,10 +2508,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_path_requires_loopback, blocks_from_json, ip_is_loopback_or_private,
-        daemon_health_state, load_runtime_conf,
-        per_ip_rate_limit, Args, ChainBlock, SUBMIT_MAX_PER_IP_PER_SEC,
-        WORK_MAX_PER_PRIVATE_IP_PER_SEC,
+        admin_path_requires_loopback, bind_rpc_servers, blocks_from_json, daemon_health_state,
+        ip_is_loopback_or_private, load_runtime_conf, per_ip_rate_limit, Args, ChainBlock,
+        SUBMIT_MAX_PER_IP_PER_SEC, WORK_MAX_PER_PRIVATE_IP_PER_SEC,
     };
     use crate::store;
     use clap::Parser;
@@ -2498,7 +2551,7 @@ mod tests {
 
     #[test]
     fn daemon_health_requires_healthy_peer_before_ready() {
-        let (ok, status, sync) = daemon_health_state(0, 0, false);
+        let (ok, status, sync) = daemon_health_state(0, 0, false, None);
         assert!(!ok);
         assert_eq!(status, "no_peers");
         assert_eq!(sync, 1.0);
@@ -2506,7 +2559,7 @@ mod tests {
 
     #[test]
     fn daemon_health_reports_ready_once_peer_is_healthy_and_synced() {
-        let (ok, status, sync) = daemon_health_state(100, 100, true);
+        let (ok, status, sync) = daemon_health_state(100, 100, true, None);
         assert!(ok);
         assert_eq!(status, "ready");
         assert_eq!(sync, 1.0);
@@ -2514,7 +2567,7 @@ mod tests {
 
     #[test]
     fn daemon_health_reports_syncing_when_peer_is_ahead() {
-        let (ok, status, sync) = daemon_health_state(80, 100, true);
+        let (ok, status, sync) = daemon_health_state(80, 100, true, None);
         assert!(!ok);
         assert_eq!(status, "syncing");
         assert!(sync < 1.0);
@@ -2522,10 +2575,19 @@ mod tests {
 
     #[test]
     fn daemon_health_stays_syncing_when_only_slightly_behind_best_seen_tip() {
-        let (ok, status, sync) = daemon_health_state(268, 270, true);
+        let (ok, status, sync) = daemon_health_state(268, 270, true, None);
         assert!(!ok);
         assert_eq!(status, "syncing");
         assert!(sync < 1.0);
+    }
+
+    #[test]
+    fn daemon_health_fail_closes_when_sync_gate_still_blocks_ready_state() {
+        let detail = "sync_gate_official_peer_insufficient tip_height=141 best_seen_height=141 official_backbone_peers=1 required_backbone_peers=2";
+        let (ok, status, sync) = daemon_health_state(141, 141, true, Some(detail));
+        assert!(!ok);
+        assert_eq!(status, "syncing");
+        assert_eq!(sync, 1.0);
     }
 
     #[test]
@@ -2719,8 +2781,19 @@ mod tests {
             super::validate_conf_listener_binds(Network::Testnet, &bad_mining).unwrap_err(),
             "invalid_mining_bind: 0.0.0.0:notaport"
         );
-        let ok = duta_core::netparams::Conf::parse("bind=0.0.0.0:18082\nminingbind=0.0.0.0:18085\n");
+        let ok =
+            duta_core::netparams::Conf::parse("bind=0.0.0.0:18082\nminingbind=0.0.0.0:18085\n");
         assert!(super::validate_conf_listener_binds(Network::Testnet, &ok).is_ok());
+    }
+
+    #[test]
+    fn bind_rpc_servers_fails_closed_when_rpc_port_is_in_use() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let err = bind_rpc_servers(&format!("127.0.0.1:{port}"), None)
+            .err()
+            .unwrap();
+        assert!(err.contains("RPC_BIND_FAIL"));
     }
 
     #[test]
