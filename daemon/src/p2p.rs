@@ -172,20 +172,11 @@ pub(crate) fn bootstrap_has_healthy_peer() -> bool {
 
 fn sync_gate_backbone_targets(net: Network) -> Vec<String> {
     let port = net.default_p2p_port().to_string();
-    let mut out: Vec<String> = net
+    net
         .default_seed_hosts()
         .iter()
         .map(|host: &&str| format!("{}:{}", host.to_ascii_lowercase(), port))
-        .collect();
-    if let Some(cfg) = cfg() {
-        for seed in cfg.seeds.iter() {
-            let addr = candidate_addr(seed.trim(), &port).to_ascii_lowercase();
-            if !addr.is_empty() && !out.iter().any(|existing| existing == &addr) {
-                out.push(addr);
-            }
-        }
-    }
-    out
+        .collect()
 }
 
 const BACKBONE_FRESHNESS_SECS: u64 = 30;
@@ -4000,6 +3991,38 @@ mod tests {
         super::note_inbound_peer_connected("seed2.dutago.xyz:19082");
         super::note_inbound_peer_tip("seed2.dutago.xyz:19082", 50, &"11".repeat(32));
         let ready = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12);
+        assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
+    }
+
+    #[test]
+    fn sync_gate_ignores_non_official_bootstrap_peer_height_when_official_peers_match() {
+        if skip_when_sync_gate_disabled() {
+            return;
+        }
+        let _guard = sync_gate_test_lock().lock().unwrap();
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "seed1.dutago.xyz:19082",
+            true,
+            Some(15),
+            Some(&"11".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "seed2.dutago.xyz:19082",
+            true,
+            Some(15),
+            Some(&"11".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "158.140.176.172:19082",
+            true,
+            Some(129),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        let ready = sync_gate_mining_ready(Network::Mainnet, 15, &"11".repeat(32), 16);
         assert!(ready.is_ok(), "unexpected error: {:?}", ready.err());
     }
 
