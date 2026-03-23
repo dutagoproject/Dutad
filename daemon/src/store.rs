@@ -1386,6 +1386,51 @@ fn block_at_from_tree(blocks: &sled::Tree, height: u64) -> Option<ChainBlock> {
     serde_json::from_slice::<ChainBlock>(&bytes).ok()
 }
 
+fn reconcile_tip_fields_with_blocks(
+    meta: &sled::Tree,
+    blocks: &sled::Tree,
+    net: Network,
+) -> Result<(u64, String, u64, u64), String> {
+    let (meta_h, meta_hash, meta_cw, meta_bits) =
+        tip_fields_from_tree(meta).unwrap_or((0, "0".repeat(64), 0, 0));
+    if meta_h == 0 && (meta_hash.is_empty() || meta_hash.chars().all(|c| c == '0')) {
+        let genesis = genesis_hash(net).to_string();
+        set_tip_fields_db(meta, 0, genesis.clone(), 0, pow_start_bits(net))?;
+        return Ok((0, genesis, 0, pow_start_bits(net)));
+    }
+    if meta_h == 0 {
+        return Ok((meta_h, meta_hash, meta_cw, meta_bits));
+    }
+    if let Some(block) = block_at_from_tree(blocks, meta_h) {
+        if block.hash32 == meta_hash {
+            return Ok((meta_h, meta_hash, meta_cw, meta_bits));
+        }
+        let cw = if block.chainwork > 0 {
+            block.chainwork
+        } else {
+            meta_cw
+        };
+        set_tip_fields_db(meta, block.height, block.hash32.clone(), cw, block.bits)?;
+        return Ok((block.height, block.hash32, cw, block.bits));
+    }
+    let mut h = meta_h.saturating_sub(1);
+    while h > 0 {
+        if let Some(block) = block_at_from_tree(blocks, h) {
+            let cw = if block.chainwork > 0 {
+                block.chainwork
+            } else {
+                meta_cw
+            };
+            set_tip_fields_db(meta, block.height, block.hash32.clone(), cw, block.bits)?;
+            return Ok((block.height, block.hash32, cw, block.bits));
+        }
+        h = h.saturating_sub(1);
+    }
+    let genesis = genesis_hash(net).to_string();
+    set_tip_fields_db(meta, 0, genesis.clone(), 0, pow_start_bits(net))?;
+    Ok((0, genesis, 0, pow_start_bits(net)))
+}
+
 fn validate_bootstrap_chain(net: Network, chain: &[ChainBlock]) -> Result<(), String> {
     if chain.is_empty() {
         return Ok(());
@@ -1581,7 +1626,7 @@ pub fn validate_candidate_block(data_dir: &str, b: &ChainBlock) -> Result<ChainB
     let net = infer_network(data_dir);
 
     let (tip_h, tip_hash, tip_cw, _tip_bits) =
-        tip_fields_from_tree(&meta).unwrap_or((0, "0".repeat(64), 0, 0));
+        reconcile_tip_fields_with_blocks(&meta, &blocks, net)?;
 
     if b.height == 0 {
         // genesis
@@ -1633,7 +1678,7 @@ pub fn note_accepted_block(data_dir: &str, b: &ChainBlock) -> Result<(), String>
 
     // Compute canonical cumulative chainwork; do NOT trust incoming b.chainwork (miner/peer provided).
     let (tip_h, tip_hash, tip_cw, _tip_bits) =
-        tip_fields_from_tree(&meta).unwrap_or((0, "0".repeat(64), 0, 0));
+        reconcile_tip_fields_with_blocks(&meta, &blocks, net)?;
 
     if b.height == 0 {
         // genesis
@@ -1699,8 +1744,10 @@ fn maybe_prune_after_accepted_block(_data_dir: &str) -> Result<(), String> {
 pub fn tip_fields(data_dir: &str) -> Option<(u64, String, u64, u64)> {
     let db = open_db(data_dir).ok()?;
     let meta = tree_meta(&db).ok()?;
+    let blocks = tree_blocks(&db).ok()?;
     let net = infer_network(data_dir);
-    let (height, hash32, chainwork, bits) = tip_fields_from_tree(&meta)?;
+    let (height, hash32, chainwork, bits) =
+        reconcile_tip_fields_with_blocks(&meta, &blocks, net).ok()?;
     if height == 0 && (hash32.is_empty() || hash32.chars().all(|c| c == '0')) {
         return Some((
             0,
@@ -2567,5 +2614,100 @@ mod tests_a5 {
             expected_bits_next(&data_dir).unwrap(),
             pow_start_bits(Network::Mainnet)
         );
+    }
+
+    #[test]
+    fn tip_fields_repairs_meta_tip_hash_from_block_store() {
+        let data_dir = temp_datadir("tip-fields-repair");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        bootstrap(&data_dir).unwrap();
+
+        let db = open_db(&data_dir).unwrap();
+        let meta = tree_meta(&db).unwrap();
+        let blocks = tree_blocks(&db).unwrap();
+
+        let block1 = ChainBlock {
+            height: 1,
+            hash32: "11".repeat(32),
+            bits: pow_start_bits(Network::Mainnet),
+            chainwork: work_from_bits(pow_start_bits(Network::Mainnet)),
+            timestamp: Some(1),
+            prevhash32: Some(genesis_hash(Network::Mainnet).to_string()),
+            merkle32: Some("22".repeat(32)),
+            nonce: Some(0),
+            miner: Some("miner-a".to_string()),
+            pow_digest32: Some("11".repeat(32)),
+            txs: None,
+        };
+        put_block_db(&blocks, &block1).unwrap();
+        set_tip_fields_db(
+            &meta,
+            1,
+            "ff".repeat(32),
+            block1.chainwork,
+            block1.bits,
+        )
+        .unwrap();
+        db.flush().unwrap();
+        drop(blocks);
+        drop(meta);
+        drop(db);
+
+        let (tip_h, tip_hash, _tip_cw, _tip_bits) = tip_fields(&data_dir).unwrap();
+        assert_eq!(tip_h, 1);
+        assert_eq!(tip_hash, block1.hash32);
+    }
+
+    #[test]
+    fn validate_candidate_block_repairs_meta_tip_before_prevhash_check() {
+        let data_dir = temp_datadir("validate-candidate-block-repair");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        bootstrap(&data_dir).unwrap();
+
+        let db = open_db(&data_dir).unwrap();
+        let meta = tree_meta(&db).unwrap();
+        let blocks = tree_blocks(&db).unwrap();
+
+        let bits = pow_start_bits(Network::Mainnet);
+        let work = work_from_bits(bits);
+        let block1 = ChainBlock {
+            height: 1,
+            hash32: "11".repeat(32),
+            bits,
+            chainwork: work,
+            timestamp: Some(1),
+            prevhash32: Some(genesis_hash(Network::Mainnet).to_string()),
+            merkle32: Some("22".repeat(32)),
+            nonce: Some(0),
+            miner: Some("miner-a".to_string()),
+            pow_digest32: Some("11".repeat(32)),
+            txs: None,
+        };
+        let block2 = ChainBlock {
+            height: 2,
+            hash32: "33".repeat(32),
+            bits,
+            chainwork: work.saturating_add(work),
+            timestamp: Some(2),
+            prevhash32: Some(block1.hash32.clone()),
+            merkle32: Some("44".repeat(32)),
+            nonce: Some(0),
+            miner: Some("miner-b".to_string()),
+            pow_digest32: Some("33".repeat(32)),
+            txs: None,
+        };
+        put_block_db(&blocks, &block1).unwrap();
+        set_tip_fields_db(&meta, 1, "ff".repeat(32), work, bits).unwrap();
+        db.flush().unwrap();
+        drop(blocks);
+        drop(meta);
+        drop(db);
+
+        let err = validate_candidate_block(&data_dir, &block2).unwrap_err();
+        assert_eq!(err, "pow_mismatch");
+
+        let (tip_h, tip_hash, _tip_cw, _tip_bits) = tip_fields(&data_dir).unwrap();
+        assert_eq!(tip_h, 1);
+        assert_eq!(tip_hash, block1.hash32);
     }
 }
