@@ -914,6 +914,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 5;
 const HEALTH_PRIORITY_BROADCAST_WAIT_MS: u64 = 500;
 const CONNECT_TRANSIENT_RETRIES: usize = 3;
 const CONNECT_TRANSIENT_RETRY_DELAY_MS: u64 = 200;
+const TX_BROADCAST_ROUNDS: usize = 8;
+const TX_BROADCAST_RETRY_DELAY_MS: u64 = 1000;
 
 fn should_resync(peer: &str, min_interval: Duration) -> bool {
     let m = RESYNC_BACKOFF.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1567,6 +1569,33 @@ fn official_sync_request_from(
     }
 }
 
+fn peer_tip_sync_request_from(
+    net: Network,
+    peer: &str,
+    local_h: u64,
+    local_hash32: &str,
+    remote_h: u64,
+    remote_hash32: &str,
+) -> Option<usize> {
+    if let Some(from) = official_sync_request_from(
+        net,
+        peer,
+        local_h,
+        local_hash32,
+        remote_h,
+        remote_hash32,
+    ) {
+        return Some(from);
+    }
+    if remote_h > local_h {
+        return Some((local_h + 1) as usize);
+    }
+    if remote_h == local_h && remote_hash32 != local_hash32 {
+        return Some(reorg_overlap_from(local_h));
+    }
+    None
+}
+
 fn health_priority_sync_from(local_h: u64) -> usize {
     let overlap_from = reorg_overlap_from(local_h);
     let earliest_full_window = local_h
@@ -2079,6 +2108,70 @@ fn send_msg(stream: &mut TcpStream, msg: &Msg) -> std::io::Result<()> {
     stream.flush()
 }
 
+fn retryable_io_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ) || matches!(err.raw_os_error(), Some(11) | Some(35) | Some(10035))
+}
+
+fn broadcast_tx_to_peer(addr: &str, cfg: &P2pConfig, txid: &str, tx: &serde_json::Value) -> Result<(), String> {
+    let mut last_err = None;
+    for attempt in 0..=CONNECT_TRANSIENT_RETRIES {
+        let mut stream = match connect_peer(addr) {
+            Ok(stream) => stream,
+            Err(err) => {
+                last_err = Some(err);
+                if attempt < CONNECT_TRANSIENT_RETRIES {
+                    thread::sleep(Duration::from_millis(CONNECT_TRANSIENT_RETRY_DELAY_MS));
+                    continue;
+                }
+                break;
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+        let hello = Msg::Hello {
+            net: cfg.net.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            genesis_hash: hello_genesis_hash(&cfg.net),
+        };
+        match send_msg(&mut stream, &hello).and_then(|_| {
+            send_msg(
+                &mut stream,
+                &Msg::Tx {
+                    txid: txid.to_string(),
+                    tx: tx.clone(),
+                },
+            )
+        }) {
+            Ok(()) => {
+                let _ = serve_broadcast_followups(
+                    &mut stream,
+                    &cfg.data_dir,
+                    Duration::from_millis(250),
+                );
+                dlog!(
+                    "p2p: broadcast_tx_sent peer={} txid={} attempt={}",
+                    addr,
+                    txid,
+                    attempt + 1
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+                if retryable_io_error(&err) && attempt < CONNECT_TRANSIENT_RETRIES {
+                    thread::sleep(Duration::from_millis(CONNECT_TRANSIENT_RETRY_DELAY_MS));
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "broadcast_tx_failed".to_string()))
+}
+
 fn serve_broadcast_followups(
     stream: &mut TcpStream,
     data_dir: &str,
@@ -2477,7 +2570,7 @@ fn handle_peer(
                 note_inbound_peer_tip(&peer, height, &hash32);
                 peer_tip_view = Some((height, hash32.clone()));
                 let (local_h, local_hash32, _bb, _cw) = tip_fields(&data_dir);
-                if let Some(from) = official_sync_request_from(
+                if let Some(from) = peer_tip_sync_request_from(
                     network,
                     &peer,
                     local_h,
@@ -2985,6 +3078,13 @@ fn handle_peer(
             }
             Msg::Tx { txid, tx } => match submit_tx::ingest_tx_p2p(&data_dir, &txid, &tx) {
                 Ok(outcome) => {
+                    dlog!(
+                        "p2p: recv_tx peer={} txid={} accepted_new={} promoted={}",
+                        peer,
+                        txid,
+                        outcome.accepted_new,
+                        outcome.promoted.len()
+                    );
                     if outcome.accepted_new {
                         broadcast_tx(&txid, &tx);
                     }
@@ -3090,7 +3190,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                 None,
                             );
                             let (local_h, local_hash32, _bb, _cw) = tip_fields(data_dir);
-                            if let Some(from) = official_sync_request_from(
+                            if let Some(from) = peer_tip_sync_request_from(
                                 network,
                                 addr,
                                 local_h,
@@ -3147,7 +3247,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                 {
                                     let (new_h, new_hash32, _new_bits, _new_cw) =
                                         tip_fields(data_dir);
-                                    if let Some(from) = official_sync_request_from(
+                                    if let Some(from) = peer_tip_sync_request_from(
                                         network,
                                         addr,
                                         new_h,
@@ -3264,7 +3364,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                                         let (new_h, new_hash32, _new_bits, _new_cw) =
                                                             tip_fields(data_dir);
                                                         if let Some(from) =
-                                                            official_sync_request_from(
+                                                            peer_tip_sync_request_from(
                                                                 network,
                                                                 addr,
                                                                 new_h,
@@ -3400,33 +3500,36 @@ pub fn broadcast_tx(txid: &str, tx: &serde_json::Value) {
         Some(c) => c,
         None => return,
     };
-    let targets = select_outbound_targets(
-        &outbound_candidates(),
-        &cfg.port,
-        &cfg.local_ip,
-        TX_BROADCAST_FANOUT,
-    );
-    for addr in targets.iter() {
-        if let Ok(mut stream) = connect_peer(addr) {
-            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-            stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-            let _ = send_msg(
-                &mut stream,
-                &Msg::Hello {
-                    net: cfg.net.clone(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    genesis_hash: hello_genesis_hash(&cfg.net),
-                },
+    let cfg_cloned = cfg.clone();
+    let txid_owned = txid.to_string();
+    let tx_owned = tx.clone();
+    thread::spawn(move || {
+        for round in 0..TX_BROADCAST_ROUNDS {
+            let targets = select_outbound_targets(
+                &outbound_candidates(),
+                &cfg_cloned.port,
+                &cfg_cloned.local_ip,
+                TX_BROADCAST_FANOUT,
             );
-            let _ = send_msg(
-                &mut stream,
-                &Msg::Tx {
-                    txid: txid.to_string(),
-                    tx: tx.clone(),
-                },
-            );
+            for addr in targets.iter() {
+                if let Err(err) = broadcast_tx_to_peer(addr, &cfg_cloned, &txid_owned, &tx_owned)
+                {
+                    log_throttled_warn(&format!("broadcast_tx:{addr}"), 10, |_| {
+                        format!(
+                            "p2p: broadcast_tx_failed peer={} txid={} round={} err={}",
+                            addr,
+                            txid_owned,
+                            round + 1,
+                            err
+                        )
+                    });
+                }
+            }
+            if round + 1 < TX_BROADCAST_ROUNDS {
+                thread::sleep(Duration::from_millis(TX_BROADCAST_RETRY_DELAY_MS));
+            }
         }
-    }
+    });
 }
 
 pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_seeds: Vec<String>) {
@@ -3582,10 +3685,11 @@ mod tests {
     use super::{
         ban_peer_manual, canonicalize_peer_token, deeper_overlap_from, health_priority_sync_from,
         is_transient_dial_error, list_banned_json, normalize_bootstrap_candidates,
-        official_tip_sync_from, parse_peers_text, read_line_limited, reorg_overlap_from,
-        should_accept_reorg_candidate, should_prefer_backbone_tie_candidate, subnet24_key,
-        sync_gate_local_submit_ready, sync_gate_mining_ready, unban_peer_manual,
-        validate_block_basic, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
+        official_tip_sync_from, parse_peers_text, peer_tip_sync_request_from, read_line_limited,
+        reorg_overlap_from, should_accept_reorg_candidate,
+        should_prefer_backbone_tie_candidate, subnet24_key, sync_gate_local_submit_ready,
+        sync_gate_mining_ready, unban_peer_manual, validate_block_basic, MAX_BLOCKS_PER_MSG,
+        MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
     use duta_core::netparams::{self, Network};
@@ -3672,6 +3776,36 @@ mod tests {
             100,
             100,
         ));
+    }
+
+    #[test]
+    fn peer_tip_sync_request_from_requests_next_height_on_testnet() {
+        assert_eq!(
+            peer_tip_sync_request_from(
+                Network::Testnet,
+                "10.77.0.12:18082",
+                142,
+                &"11".repeat(32),
+                143,
+                &"22".repeat(32),
+            ),
+            Some(143)
+        );
+    }
+
+    #[test]
+    fn peer_tip_sync_request_from_requests_overlap_on_testnet_tip_conflict() {
+        assert_eq!(
+            peer_tip_sync_request_from(
+                Network::Testnet,
+                "10.77.0.12:18082",
+                142,
+                &"11".repeat(32),
+                142,
+                &"22".repeat(32),
+            ),
+            Some(reorg_overlap_from(142))
+        );
     }
 
     #[test]

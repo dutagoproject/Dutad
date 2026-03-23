@@ -54,8 +54,7 @@ fn sighash(txv: &serde_json::Value) -> Result<[u8; 32], String> {
 }
 
 fn txid_from_value(v: &serde_json::Value) -> Result<String, String> {
-    let b = canon_json::canonical_json_bytes(v)?;
-    Ok(hash::sha3_256_hex(&b))
+    store::txid_from_value(v)
 }
 
 fn required_relay_fee(tx_bytes: usize) -> u64 {
@@ -243,6 +242,51 @@ fn rebuild_mempool_txids(mp: &mut serde_json::Value) {
         }
     }
     mp["txids"] = serde_json::Value::Array(new_txids);
+}
+
+pub fn prune_confirmed_txids_from_mempool_file(data_dir: &str, txids: &[String]) {
+    if txids.is_empty() {
+        return;
+    }
+    let mut mp = load_mempool(data_dir);
+    let mut changed = false;
+    for txid in txids {
+        if remove_tx_from_mempool(&mut mp, txid) {
+            changed = true;
+        }
+        if mp["orphans"]["txs"]
+            .as_object_mut()
+            .map(|o| o.remove(txid).is_some())
+            .unwrap_or(false)
+        {
+            changed = true;
+        }
+        if mp["orphans"]["meta"]
+            .as_object_mut()
+            .map(|o| o.remove(txid).is_some())
+            .unwrap_or(false)
+        {
+            changed = true;
+        }
+    }
+    if changed {
+        if let Some(old) = mp["orphans"]["txids"].as_array() {
+            let keep: Vec<serde_json::Value> = old
+                .iter()
+                .filter_map(|v| {
+                    let txid = v.as_str()?;
+                    if txids.iter().any(|confirmed| confirmed == txid) {
+                        None
+                    } else {
+                        Some(json!(txid))
+                    }
+                })
+                .collect();
+            mp["orphans"]["txids"] = serde_json::Value::Array(keep);
+        }
+        rebuild_mempool_txids(&mut mp);
+        let _ = save_mempool(data_dir, &mp);
+    }
 }
 
 fn orphan_try_promote(data_dir: &str, mp: &mut serde_json::Value) -> Vec<String> {
@@ -680,10 +724,11 @@ pub fn ingest_tx(
     if tx_bytes.len() > MAX_TX_BYTES {
         return Err("tx_too_large".to_string());
     }
+    let canonical_txid = txid_from_value(tx).unwrap_or_else(|_| hash::sha3_256_hex(&tx_bytes));
     let txid = txid_opt
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| txid_from_value(tx).unwrap_or_else(|_| hash::sha3_256_hex(&tx_bytes)));
+        .unwrap_or_else(|| canonical_txid.clone());
 
     let mut mp = load_mempool(data_dir);
 
@@ -901,8 +946,9 @@ pub fn handle_submit_tx(
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_mempool_caps, ingest_tx_p2p, parse_submit_tx_request, rebuild_mempool_txids,
-        sanitize_mempool_value, txid_from_value, txid_is_valid,
+        enforce_mempool_caps, ingest_tx_p2p, load_mempool, parse_submit_tx_request,
+        prune_confirmed_txids_from_mempool_file, rebuild_mempool_txids, sanitize_mempool_value,
+        save_mempool, txid_from_value, txid_is_valid,
     };
     use duta_core::address;
     use ed25519_dalek::{Signer, SigningKey};
@@ -1089,6 +1135,48 @@ mod tests {
         let repaired = sanitize_mempool_value(&mp).expect("stale txids should be repaired");
         assert_eq!(repaired["txids"], json!([canonical.clone()]));
         assert!(repaired["txs"].get(&canonical).is_some());
+    }
+
+    #[test]
+    fn prune_confirmed_txids_from_mempool_file_removes_confirmed_from_pool_and_orphans() {
+        let data_dir = temp_datadir("prune-confirmed-mempool");
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}],
+            "fee": 1000,
+            "size": 123
+        });
+        let mut tx_for_id = tx.clone();
+        tx_for_id.as_object_mut().expect("tx object").remove("size");
+        let txid = txid_from_value(&tx_for_id).expect("canonical txid");
+        let orphan_txid = "bb".repeat(32);
+        let mp = json!({
+            "txids": [txid.clone()],
+            "txs": {
+                txid.clone(): tx
+            },
+            "orphans": {
+                "txids": [txid.clone(), orphan_txid.clone()],
+                "txs": {
+                    txid.clone(): {"fee": 1000},
+                    orphan_txid.clone(): {"fee": 2000}
+                },
+                "meta": {
+                    txid.clone(): {"ts": 1, "bytes": 123},
+                    orphan_txid.clone(): {"ts": 2, "bytes": 234}
+                }
+            }
+        });
+        save_mempool(&data_dir, &mp).expect("save mempool");
+
+        prune_confirmed_txids_from_mempool_file(&data_dir, std::slice::from_ref(&txid));
+
+        let updated = load_mempool(&data_dir);
+        assert_eq!(updated["txids"], json!([]));
+        assert!(updated["txs"].get(&txid).is_none());
+        assert_eq!(updated["orphans"]["txids"], json!([orphan_txid]));
+        assert!(updated["orphans"]["txs"].get(&txid).is_none());
+        assert!(updated["orphans"]["meta"].get(&txid).is_none());
     }
 
     #[test]

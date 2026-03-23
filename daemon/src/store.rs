@@ -54,13 +54,24 @@ struct DataDirMeta {
     app_version: String,
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static DURABLE_WRITE_SEQ: OnceLock<AtomicU64> = OnceLock::new();
+
 pub fn durable_write_bytes(path: &str, body: &[u8]) -> Result<(), String> {
     let path_ref = std::path::Path::new(path);
     if let Some(parent) = path_ref.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("dir_create_failed: {}", e))?;
     }
 
-    let tmp = format!("{}.tmp.{}", path, std::process::id());
+    let seq = DURABLE_WRITE_SEQ
+        .get_or_init(|| AtomicU64::new(0))
+        .fetch_add(1, Ordering::Relaxed);
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = format!("{}.tmp.{}.{}.{}", path, std::process::id(), now_nanos, seq);
     let mut f = fs::File::create(&tmp).map_err(|e| format!("tmp_create_failed: {}", e))?;
     f.write_all(body)
         .map_err(|e| format!("tmp_write_failed: {}", e))?;
@@ -185,7 +196,26 @@ fn header80_from_block(b: &ChainBlock) -> Result<[u8; 80], String> {
 }
 
 pub fn txid_from_value(v: &serde_json::Value) -> Result<String, String> {
-    let body = canon_json::canonical_json_bytes(v)?;
+    let mut tx = v.clone();
+    if let Some(obj) = tx.as_object_mut() {
+        for key in [
+            "size",
+            "txid",
+            "hash",
+            "hex",
+            "vsize",
+            "weight",
+            "confirmations",
+            "blockhash",
+            "height",
+            "in_active_chain",
+            "time",
+            "timereceived",
+        ] {
+            obj.remove(key);
+        }
+    }
+    let body = canon_json::canonical_json_bytes(&tx)?;
     Ok(hash::sha3_256_hex(&body))
 }
 
@@ -1642,8 +1672,10 @@ pub fn note_accepted_block(data_dir: &str, b: &ChainBlock) -> Result<(), String>
         validate_coinbase_subsidy(&utxo, b2.height, &txs)?;
         validate_utxo_invariants_for_block(&utxo, b2.height, &txs)?;
         apply_utxo_for_block(&utxo, &undo, b2.height, &txs)?;
+        let confirmed_txids: Vec<String> = txs.iter().map(|(txid, _)| txid.clone()).collect();
         put_block_db(&blocks, &b2)?;
         put_hash_index_db(&hash_index, &b2.hash32, b2.height)?;
+        crate::submit_tx::prune_confirmed_txids_from_mempool_file(data_dir, &confirmed_txids);
         // Best-effort: newly updated UTXO may satisfy some orphan txs
         let _ = crate::submit_tx::orphan_try_promote_file(data_dir);
     } else {
@@ -2444,6 +2476,28 @@ mod tests_a5 {
         let data_dir = temp_datadir("infer-network-meta");
         ensure_datadir_meta(&data_dir, "testnet").unwrap();
         assert_eq!(infer_network(&data_dir), Network::Testnet);
+    }
+
+    #[test]
+    fn durable_write_bytes_uses_unique_tmp_files_per_write() {
+        let data_dir = temp_datadir("durable-write-unique");
+        let path = format!("{}/mempool.json", data_dir);
+        let mut joins = Vec::new();
+        for idx in 0..8u64 {
+            let path_cloned = path.clone();
+            joins.push(std::thread::spawn(move || {
+                for iter in 0..32u64 {
+                    let body = format!("{{\"idx\":{},\"iter\":{}}}", idx, iter);
+                    durable_write_string(&path_cloned, &body).expect("durable write should succeed");
+                }
+            }));
+        }
+        for join in joins {
+            join.join().expect("writer thread");
+        }
+        let final_body = std::fs::read_to_string(&path).expect("final body");
+        assert!(final_body.contains("\"idx\""));
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]

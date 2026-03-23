@@ -581,8 +581,7 @@ fn tx_hex_from_json(tx: &serde_json::Value) -> Result<String, String> {
 }
 
 fn txid_from_json(tx: &serde_json::Value) -> Result<String, String> {
-    let bytes = crate::canon_json::canonical_json_bytes(tx)?;
-    Ok(duta_core::hash::sha3_256_hex(&bytes))
+    crate::store::txid_from_value(tx)
 }
 
 fn find_tx(
@@ -595,7 +594,9 @@ fn find_tx(
     }
     let (tip_h, _hash, _cw, _bits) = crate::store::tip_fields(data_dir)?;
     for h in 0..=tip_h {
-        let b = crate::store::block_at(data_dir, h)?;
+        let Some(b) = crate::store::block_at(data_dir, h) else {
+            continue;
+        };
         if let Some(tx) = b.txs.as_ref().and_then(|x| x.get(txid)).cloned() {
             return Some((tx, Some(b.hash32), Some(h), Some(tip_h - h + 1)));
         }
