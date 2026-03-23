@@ -914,6 +914,10 @@ const CONNECT_TIMEOUT_SECS: u64 = 5;
 const HEALTH_PRIORITY_BROADCAST_WAIT_MS: u64 = 500;
 const CONNECT_TRANSIENT_RETRIES: usize = 3;
 const CONNECT_TRANSIENT_RETRY_DELAY_MS: u64 = 200;
+const DIAL_BASE_IO_TIMEOUT_SECS: u64 = 2;
+const DIAL_SYNC_IO_TIMEOUT_SECS: u64 = 10;
+const DIAL_BASE_READ_STEPS: usize = 16;
+const DIAL_SYNC_READ_STEPS: usize = 256;
 const TX_BROADCAST_ROUNDS: usize = 8;
 const TX_BROADCAST_RETRY_DELAY_MS: u64 = 1000;
 
@@ -2115,6 +2119,15 @@ fn retryable_io_error(err: &std::io::Error) -> bool {
     ) || matches!(err.raw_os_error(), Some(11) | Some(35) | Some(10035))
 }
 
+fn treat_sync_read_timeout_as_clean_close(
+    err: &std::io::Error,
+    saw_peer_tip: bool,
+    requested_sync: bool,
+    appended_blocks: bool,
+) -> bool {
+    retryable_io_error(err) && saw_peer_tip && (requested_sync || appended_blocks)
+}
+
 fn broadcast_tx_to_peer(addr: &str, cfg: &P2pConfig, txid: &str, tx: &serde_json::Value) -> Result<(), String> {
     let mut last_err = None;
     for attempt in 0..=CONNECT_TRANSIENT_RETRIES {
@@ -3127,8 +3140,12 @@ fn handle_peer(
 fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
     let network = Network::parse_name(net).unwrap_or(Network::Mainnet);
     let mut stream = connect_peer(addr)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(DIAL_BASE_IO_TIMEOUT_SECS)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(DIAL_BASE_IO_TIMEOUT_SECS)))
+        .ok();
 
     send_msg(
         &mut stream,
@@ -3153,7 +3170,12 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
     let mut reader = BufReader::new(reader_stream);
     let mut raw = Vec::<u8>::new();
     let mut peer_tip_view: Option<(u64, String)> = None;
-    for _ in 0..16 {
+    let mut requested_sync = false;
+    let mut appended_blocks = false;
+    let mut max_read_steps = DIAL_BASE_READ_STEPS;
+    let mut step = 0usize;
+    while step < max_read_steps {
+        step = step.saturating_add(1);
         match read_line_limited(&mut reader, &mut raw) {
             Ok(0) => break,
             Ok(_) => {
@@ -3206,6 +3228,14 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                     },
                                 );
                                 note_peer_resync(addr, false, true);
+                                requested_sync = true;
+                                max_read_steps = DIAL_SYNC_READ_STEPS;
+                                let _ = stream.set_read_timeout(Some(Duration::from_secs(
+                                    DIAL_SYNC_IO_TIMEOUT_SECS,
+                                )));
+                                let _ = stream.set_write_timeout(Some(Duration::from_secs(
+                                    DIAL_SYNC_IO_TIMEOUT_SECS,
+                                )));
                             }
                         }
                         Msg::Blocks { blocks } => {
@@ -3230,6 +3260,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                         0
                                     }
                                 };
+                                appended_blocks |= appended > 0;
                                 if appended > 0 && blocks.len() >= MAX_BLOCKS_PER_MSG {
                                     let from = blocks
                                         .last()
@@ -3242,6 +3273,14 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                             limit: MAX_BLOCKS_PER_MSG,
                                         },
                                     );
+                                    requested_sync = true;
+                                    max_read_steps = DIAL_SYNC_READ_STEPS;
+                                    let _ = stream.set_read_timeout(Some(Duration::from_secs(
+                                        DIAL_SYNC_IO_TIMEOUT_SECS,
+                                    )));
+                                    let _ = stream.set_write_timeout(Some(Duration::from_secs(
+                                        DIAL_SYNC_IO_TIMEOUT_SECS,
+                                    )));
                                 } else if let Some((remote_h, remote_hash32)) =
                                     peer_tip_view.as_ref()
                                 {
@@ -3263,6 +3302,14 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                             },
                                         );
                                         note_peer_resync(addr, false, true);
+                                        requested_sync = true;
+                                        max_read_steps = DIAL_SYNC_READ_STEPS;
+                                        let _ = stream.set_read_timeout(Some(Duration::from_secs(
+                                            DIAL_SYNC_IO_TIMEOUT_SECS,
+                                        )));
+                                        let _ = stream.set_write_timeout(Some(Duration::from_secs(
+                                            DIAL_SYNC_IO_TIMEOUT_SECS,
+                                        )));
                                     }
                                 }
                                 continue;
@@ -3341,6 +3388,7 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                                 }
                                             };
                                             if appended > 0 {
+                                                appended_blocks = true;
                                                 let backbone_tie = incoming_cw == tip_cw;
                                                 note_reorg_accept(backbone_tie);
                                                 if let Some(last) = slice.last() {
@@ -3381,6 +3429,18 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                                                 },
                                                             );
                                                             note_peer_resync(addr, false, true);
+                                                            requested_sync = true;
+                                                            max_read_steps = DIAL_SYNC_READ_STEPS;
+                                                            let _ = stream.set_read_timeout(
+                                                                Some(Duration::from_secs(
+                                                                    DIAL_SYNC_IO_TIMEOUT_SECS,
+                                                                )),
+                                                            );
+                                                            let _ = stream.set_write_timeout(
+                                                                Some(Duration::from_secs(
+                                                                    DIAL_SYNC_IO_TIMEOUT_SECS,
+                                                                )),
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -3419,6 +3479,14 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                 }
             }
             Err(e) => {
+                if treat_sync_read_timeout_as_clean_close(
+                    &e,
+                    peer_tip_view.is_some(),
+                    requested_sync,
+                    appended_blocks,
+                ) {
+                    return Ok(());
+                }
                 let err = e.to_string();
                 note_outbound_peer_result(addr, false, None, None, Some(&err));
                 return Err(err);
@@ -3688,8 +3756,8 @@ mod tests {
         official_tip_sync_from, parse_peers_text, peer_tip_sync_request_from, read_line_limited,
         reorg_overlap_from, should_accept_reorg_candidate,
         should_prefer_backbone_tie_candidate, subnet24_key, sync_gate_local_submit_ready,
-        sync_gate_mining_ready, unban_peer_manual, validate_block_basic, MAX_BLOCKS_PER_MSG,
-        MAX_LINE_BYTES,
+        sync_gate_mining_ready, treat_sync_read_timeout_as_clean_close, unban_peer_manual,
+        validate_block_basic, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
     use duta_core::netparams::{self, Network};
@@ -3937,6 +4005,23 @@ mod tests {
         assert!(is_transient_dial_error("operation would block"));
         assert!(is_transient_dial_error("timed out"));
         assert!(!is_transient_dial_error("connection refused"));
+    }
+
+    #[test]
+    fn sync_read_timeout_is_clean_after_progress() {
+        let err = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(treat_sync_read_timeout_as_clean_close(
+            &err, true, true, false
+        ));
+        assert!(treat_sync_read_timeout_as_clean_close(
+            &err, true, false, true
+        ));
+        assert!(!treat_sync_read_timeout_as_clean_close(
+            &err, true, false, false
+        ));
+        assert!(!treat_sync_read_timeout_as_clean_close(
+            &err, false, true, true
+        ));
     }
 
     #[test]
