@@ -4,7 +4,13 @@
 
 It contains the chain-critical parts of the project: consensus rules, block and transaction validation, storage, daemon RPC, P2P networking, and the built-in solo mining flow.
 
-Current release line: `1.0.1`
+Current release line: `1.0.2`
+
+Release `1.0.2` focus:
+
+- transaction relay and mempool visibility are more consistent across nodes
+- sync/apply state now self-heals stale tip metadata so stuck nodes can catch up again
+- confirmed transactions are pruned from mempool more reliably and raw transaction lookup stays consistent after confirmation
 
 Website: https://dutago.xyz
 
