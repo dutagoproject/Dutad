@@ -677,8 +677,7 @@ pub fn p2p_public_info() -> serde_json::Value {
         netparams::pow_bootstrap_sync_enabled(launch_cfg, tip_h.saturating_add(1), tip_bits);
     let sync_gate_unhealthy_now = sync_gate_unhealthy(launch_cfg, tip_h, &tip_hash32);
     let sync_gate_active = sync_gate_hard_active || sync_gate_unhealthy_now;
-    let sync_gate_detail =
-        sync_gate_mining_ready(launch_cfg, tip_h, &tip_hash32, tip_bits).err();
+    let sync_gate_detail = sync_gate_mining_ready(launch_cfg, tip_h, &tip_hash32, tip_bits).err();
     let network_health_priority = network_health_priority_active();
     let backbone_tip_lag = launch_backbone_max_height
         .unwrap_or(0)
@@ -1684,7 +1683,7 @@ fn outbound_quarantined_peers_json() -> Vec<serde_json::Value> {
     let mut out: Vec<(PeerSnapshot, &'static str)> = peers
         .values()
         .filter(|peer| {
-    bootstrap_net
+            bootstrap_net
                 .map(|net| !is_launch_backbone_peer_for_net(net, &peer.addr))
                 .unwrap_or(true)
         })
@@ -2234,8 +2233,11 @@ fn penalize_bad_blocks(peer: &str, peer_ip: IpAddr, err: &str, net: &str, data_d
         && Network::parse_name(net)
             .map(|network| {
                 let (tip_height, _, tip_bits, _) = tip_fields(data_dir);
-                netparams::pow_bootstrap_sync_enabled(network, tip_height.saturating_add(1), tip_bits)
-                    && is_launch_backbone_peer_for_net(network, peer)
+                netparams::pow_bootstrap_sync_enabled(
+                    network,
+                    tip_height.saturating_add(1),
+                    tip_bits,
+                ) && is_launch_backbone_peer_for_net(network, peer)
             })
             .unwrap_or(false);
     if (ip_is_loopback_or_private(peer_ip) || bootstrap_seed_recovery)
@@ -2554,10 +2556,7 @@ fn handle_peer(
                                 fork_point = Some(fp_h);
                             } else {
                                 // Window doesn't include anything after the common ancestor.
-                                if should_resync(
-                                    &peer,
-                                    sync_gate_resync_interval(network, &peer),
-                                ) {
+                                if should_resync(&peer, sync_gate_resync_interval(network, &peer)) {
                                     let from = deeper_overlap_from(first0.height);
                                     let limit = MAX_BLOCKS_PER_MSG;
                                     let _ =
@@ -2614,10 +2613,7 @@ fn handle_peer(
                             if first.height == tip_h + 1 {
                                 // Likely fork: peer is sending blocks that don't connect to our tip.
                                 // Ask for an overlapping window so we can find the common ancestor and reorg.
-                                if should_resync(
-                                    &peer,
-                                    sync_gate_resync_interval(network, &peer),
-                                ) {
+                                if should_resync(&peer, sync_gate_resync_interval(network, &peer)) {
                                     let from = reorg_overlap_from(tip_h);
                                     let limit = MAX_BLOCKS_PER_MSG;
                                     let _ =
@@ -2778,8 +2774,11 @@ fn handle_peer(
                                         from,
                                         limit
                                     );
-                                } else if let Some((remote_h, remote_hash32)) = peer_tip_view.as_ref() {
-                                    let (new_h, new_hash32, _new_bits, _new_cw) = tip_fields(&data_dir);
+                                } else if let Some((remote_h, remote_hash32)) =
+                                    peer_tip_view.as_ref()
+                                {
+                                    let (new_h, new_hash32, _new_bits, _new_cw) =
+                                        tip_fields(&data_dir);
                                     if let Some(from) = official_sync_request_from(
                                         network,
                                         &peer,
@@ -2984,12 +2983,20 @@ fn handle_peer(
                     }
                 }
             }
-            Msg::Tx { txid, tx } => {
-                if let Err(e) = submit_tx::ingest_tx_p2p(&data_dir, &txid, &tx) {
+            Msg::Tx { txid, tx } => match submit_tx::ingest_tx_p2p(&data_dir, &txid, &tx) {
+                Ok(outcome) => {
+                    if outcome.accepted_new {
+                        broadcast_tx(&txid, &tx);
+                    }
+                    for (promoted_txid, promoted_tx) in outcome.promoted {
+                        broadcast_tx(&promoted_txid, &promoted_tx);
+                    }
+                }
+                Err(e) => {
                     note_inbound_peer_error(&peer, &e);
                     edlog!("p2p ingest_tx failed peer={} txid={} err={}", peer, txid, e);
                 }
-            }
+            },
             Msg::Error { error, detail } => {
                 note_inbound_peer_error(&peer, &format!("{}:{}", error, detail));
                 dlog!(
@@ -3135,7 +3142,9 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                             limit: MAX_BLOCKS_PER_MSG,
                                         },
                                     );
-                                } else if let Some((remote_h, remote_hash32)) = peer_tip_view.as_ref() {
+                                } else if let Some((remote_h, remote_hash32)) =
+                                    peer_tip_view.as_ref()
+                                {
                                     let (new_h, new_hash32, _new_bits, _new_cw) =
                                         tip_fields(data_dir);
                                     if let Some(from) = official_sync_request_from(
@@ -3254,14 +3263,16 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                                     {
                                                         let (new_h, new_hash32, _new_bits, _new_cw) =
                                                             tip_fields(data_dir);
-                                                        if let Some(from) = official_sync_request_from(
-                                                            network,
-                                                            addr,
-                                                            new_h,
-                                                            &new_hash32,
-                                                            *remote_h,
-                                                            remote_hash32,
-                                                        ) {
+                                                        if let Some(from) =
+                                                            official_sync_request_from(
+                                                                network,
+                                                                addr,
+                                                                new_h,
+                                                                &new_hash32,
+                                                                *remote_h,
+                                                                remote_hash32,
+                                                            )
+                                                        {
                                                             let _ = send_msg(
                                                                 &mut stream,
                                                                 &Msg::GetBlocksFrom {
@@ -3569,12 +3580,11 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 #[cfg(test)]
 mod tests {
     use super::{
-        ban_peer_manual, canonicalize_peer_token, is_transient_dial_error,
-        deeper_overlap_from, health_priority_sync_from, sync_gate_local_submit_ready,
-        sync_gate_mining_ready, list_banned_json, normalize_bootstrap_candidates,
+        ban_peer_manual, canonicalize_peer_token, deeper_overlap_from, health_priority_sync_from,
+        is_transient_dial_error, list_banned_json, normalize_bootstrap_candidates,
         official_tip_sync_from, parse_peers_text, read_line_limited, reorg_overlap_from,
-        should_accept_reorg_candidate,
-        should_prefer_backbone_tie_candidate, subnet24_key, unban_peer_manual,
+        should_accept_reorg_candidate, should_prefer_backbone_tie_candidate, subnet24_key,
+        sync_gate_local_submit_ready, sync_gate_mining_ready, unban_peer_manual,
         validate_block_basic, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
@@ -3685,8 +3695,8 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let err = sync_gate_local_submit_ready(Network::Mainnet, 26, &"33".repeat(32), 22)
-            .unwrap_err();
+        let err =
+            sync_gate_local_submit_ready(Network::Mainnet, 26, &"33".repeat(32), 22).unwrap_err();
         assert!(err.starts_with("sync_gate_competing_official_tip"));
     }
 
@@ -3955,8 +3965,7 @@ mod tests {
         }
         let _guard = sync_gate_test_lock().lock().unwrap();
         clear_test_peer_state();
-        let err =
-            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("sync_gate_official_peer_insufficient"));
     }
 
@@ -3974,8 +3983,7 @@ mod tests {
             Some(&"11".repeat(32)),
             None,
         );
-        let err =
-            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.contains("official_backbone_peers=1"));
         super::note_outbound_peer_result(
             "seed2.dutago.xyz:19082",
@@ -4024,8 +4032,7 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let err =
-            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("sync_gate_official_tip_mismatch"));
     }
 
@@ -4189,8 +4196,7 @@ mod tests {
             Some(&"88".repeat(32)),
             None,
         );
-        let err =
-            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("sync_gate_official_tip_mismatch"));
     }
 
@@ -4215,8 +4221,7 @@ mod tests {
             Some(&"22".repeat(32)),
             None,
         );
-        let err =
-            sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
+        let err = sync_gate_mining_ready(Network::Mainnet, 50, &"11".repeat(32), 12).unwrap_err();
         assert!(err.starts_with("sync_gate_official_tip_mismatch"));
     }
 
@@ -4261,12 +4266,10 @@ mod tests {
             Some(&"11".repeat(32)),
             None,
         );
-        let err =
-            sync_gate_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22).unwrap_err();
+        let err = sync_gate_mining_ready(Network::Mainnet, 2000, &"11".repeat(32), 22).unwrap_err();
         assert!(
             err.starts_with("sync_gate_syncing")
                 || err.starts_with("sync_gate_official_peer_insufficient")
         );
     }
 }
-

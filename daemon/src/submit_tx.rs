@@ -245,7 +245,7 @@ fn rebuild_mempool_txids(mp: &mut serde_json::Value) {
     mp["txids"] = serde_json::Value::Array(new_txids);
 }
 
-fn orphan_try_promote(data_dir: &str, mp: &mut serde_json::Value) {
+fn orphan_try_promote(data_dir: &str, mp: &mut serde_json::Value) -> Vec<String> {
     ensure_orphan_shape(mp);
     let txids = mp["orphans"]["txids"]
         .as_array()
@@ -312,6 +312,7 @@ fn orphan_try_promote(data_dir: &str, mp: &mut serde_json::Value) {
         }
         rebuild_mempool_txids(mp);
     }
+    promoted
 }
 
 pub fn orphan_try_promote_file(data_dir: &str) {
@@ -320,7 +321,7 @@ pub fn orphan_try_promote_file(data_dir: &str) {
     ensure_orphan_shape(&mut mp);
     let now = now_secs();
     orphan_prune(&mut mp, now);
-    orphan_try_promote(data_dir, &mut mp);
+    let _ = orphan_try_promote(data_dir, &mut mp);
     let _ = save_mempool(data_dir, &mp);
 }
 
@@ -724,10 +725,26 @@ pub fn ingest_tx(
     Ok(txid)
 }
 
-/// Called from P2P receive path. Best-effort ingest; does NOT rebroadcast.
-pub fn ingest_tx_p2p(data_dir: &str, txid: &str, tx: &serde_json::Value) -> Result<(), String> {
+#[derive(Clone, Debug, Default)]
+pub struct P2pIngestOutcome {
+    pub accepted_new: bool,
+    pub promoted: Vec<(String, serde_json::Value)>,
+}
+
+/// Called from P2P receive path. Best-effort ingest; caller decides whether to rebroadcast.
+pub fn ingest_tx_p2p(
+    data_dir: &str,
+    txid: &str,
+    tx: &serde_json::Value,
+) -> Result<P2pIngestOutcome, String> {
+    let before = load_mempool(data_dir);
+    let already_in_mempool = before
+        .get("txs")
+        .and_then(|x| x.as_object())
+        .map(|txs| txs.contains_key(txid))
+        .unwrap_or(false);
     // P2P orphan policy (phase 1): if inputs are missing, store as orphan (bounded + TTL)
-    // instead of hard-rejecting. Do not rebroadcast from here.
+    // instead of hard-rejecting.
     match ingest_tx(data_dir, Some(txid), tx) {
         Ok(_tid) => {
             // Best-effort promote any orphans that may now be satisfiable.
@@ -738,9 +755,21 @@ pub fn ingest_tx_p2p(data_dir: &str, txid: &str, tx: &serde_json::Value) -> Resu
             if mp.get("txs").and_then(|x| x.as_object()).is_none() {
                 mp["txs"] = json!({});
             }
-            orphan_try_promote(data_dir, &mut mp);
+            let promoted_ids = orphan_try_promote(data_dir, &mut mp);
+            let promoted = promoted_ids
+                .into_iter()
+                .filter_map(|promoted_txid| {
+                    mp.get("txs")
+                        .and_then(|x| x.get(&promoted_txid))
+                        .cloned()
+                        .map(|txv| (promoted_txid, txv))
+                })
+                .collect();
             let _ = save_mempool(data_dir, &mp);
-            Ok(())
+            Ok(P2pIngestOutcome {
+                accepted_new: !already_in_mempool,
+                promoted,
+            })
         }
         Err(e) if e == "input_not_found" => {
             let tx_bytes =
@@ -754,7 +783,7 @@ pub fn ingest_tx_p2p(data_dir: &str, txid: &str, tx: &serde_json::Value) -> Resu
             }
             orphan_add(&mut mp, txid, tx, tx_bytes.len());
             save_mempool(data_dir, &mp)?;
-            Ok(())
+            Ok(P2pIngestOutcome::default())
         }
         Err(e) => Err(e),
     }
@@ -872,10 +901,63 @@ pub fn handle_submit_tx(
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_mempool_caps, parse_submit_tx_request, rebuild_mempool_txids,
+        enforce_mempool_caps, ingest_tx_p2p, parse_submit_tx_request, rebuild_mempool_txids,
         sanitize_mempool_value, txid_from_value, txid_is_valid,
     };
+    use duta_core::address;
+    use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_datadir(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-submit-tx-test-{}-{}", tag, uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        p.to_string_lossy().to_string()
+    }
+
+    fn put_utxo_with_pkh(
+        data_dir: &str,
+        txid: &str,
+        vout: u64,
+        value: u64,
+        created_height: u64,
+        pkh_hex: &str,
+    ) {
+        let db_path = format!("{}/db", data_dir.trim_end_matches('/'));
+        let db = sled::open(&db_path).unwrap();
+        let utxo = db.open_tree(b"utxo").unwrap();
+        let k = format!("{}:{}", txid, vout).into_bytes();
+        let v = json!({
+            "value": value,
+            "created_height": created_height,
+            "is_coinbase": false,
+            "pkh": pkh_hex
+        });
+        utxo.insert(k, serde_json::to_vec(&v).unwrap()).unwrap();
+        utxo.flush().unwrap();
+        db.flush().unwrap();
+    }
+
+    fn signed_tx_for_test(prev_txid: &str, prev_vout: u64, input_value: u64) -> serde_json::Value {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pub_hex = hex::encode(sk.verifying_key().to_bytes());
+        let pkh = address::pkh_from_pubkey(&sk.verifying_key().to_bytes());
+        let dest =
+            address::pkh_to_address_for_network(duta_core::netparams::Network::Mainnet, &pkh);
+        let mut tx = json!({
+            "vin":[{"txid":prev_txid,"vout":prev_vout,"pubkey":pub_hex,"sig":""}],
+            "vout":[{"address":dest,"value":input_value - super::required_relay_fee(256)}]
+        });
+        let msg = super::sighash(&tx).expect("sighash");
+        let sig = sk.sign(&msg);
+        tx["vin"][0]["sig"] = json!(hex::encode(sig.to_bytes()));
+        tx
+    }
 
     #[test]
     fn txid_validation_requires_fixed_hex_shape() {
@@ -1007,5 +1089,29 @@ mod tests {
         let repaired = sanitize_mempool_value(&mp).expect("stale txids should be repaired");
         assert_eq!(repaired["txids"], json!([canonical.clone()]));
         assert!(repaired["txs"].get(&canonical).is_some());
+    }
+
+    #[test]
+    fn ingest_tx_p2p_marks_new_accepts_but_not_duplicates() {
+        let data_dir = temp_datadir("p2p-ingest");
+        crate::store::ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pkh = address::pkh_to_hex(&address::pkh_from_pubkey(&sk.verifying_key().to_bytes()));
+        put_utxo_with_pkh(&data_dir, &"aa".repeat(32), 0, 50_000, 100, &pkh);
+        let tx = signed_tx_for_test(&"aa".repeat(32), 0, 50_000);
+        let txid = super::txid_from_value(&tx).expect("txid");
+
+        let first = ingest_tx_p2p(&data_dir, &txid, &tx).expect("first ingest");
+        assert!(first.accepted_new);
+        assert!(first.promoted.is_empty());
+
+        let stored_txid = super::load_mempool(&data_dir)["txids"][0]
+            .as_str()
+            .expect("stored txid")
+            .to_string();
+        let second = ingest_tx_p2p(&data_dir, &stored_txid, &tx).expect("second ingest");
+        assert!(!second.accepted_new);
+        assert!(second.promoted.is_empty());
     }
 }
