@@ -163,7 +163,7 @@ pub fn pow_start_bits(net: Network) -> u64 {
 
 pub fn pow_v4_activation_height(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 180_000,
+        Network::Mainnet => 5_400,
         Network::Testnet => 1,
         Network::Stagenet => 1,
     }

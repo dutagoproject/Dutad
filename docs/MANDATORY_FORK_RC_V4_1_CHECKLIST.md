@@ -24,13 +24,11 @@ Pre-activation checks:
 - Record release artifact hashes in the RC bundle manifest.
 
 Activation planning checks:
-- Activation height proposal:
-  stable mainnet height observed on public seeds: 4,400.
-  option cepat = 4,800.
-  option aman = 5,400.
+- Final activation height:
+  mainnet = 5,400.
   testnet = immediate/manual for lab only.
   stagenet = separate/manual if used.
-- Freeze one of the two mainnet activation heights in the final release announcement and manifest before publishing binaries.
+- Freeze `5,400` in the final release announcement and manifest before publishing binaries.
 - Publish exact upgrade window and operator deadline.
 - Require patched node deployment before activation height.
 - Require mining operators to switch to patched miner/node path before activation.

@@ -7,11 +7,9 @@ Scope:
 - Network path: mandatory fork candidate `v4.1`
 
 Activation proposal:
-- Stable mainnet height observed on public seeds: `4,400`.
-- Option cepat: activation at `4,800`.
-- Option aman: activation at `5,400`.
-- Do not publish binaries without freezing one of those two heights in the operator announcement.
-- Operator notice should explicitly state which option was chosen before rollout starts.
+- Stable mainnet height observed on public seeds at planning time: `4,400`.
+- Final mainnet activation height: `5,400`.
+- Publish binaries and operator notice with `5,400` as the only activation height.
 
 Operator rollout sequence:
 1. Stage patched binaries on every node host.
