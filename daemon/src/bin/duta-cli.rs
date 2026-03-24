@@ -8,9 +8,12 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
+const RELEASE_VERSION: &str = "1.0.2-v4.1-rc1";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "duta-cli",
+    version = RELEASE_VERSION,
     about = "DUTA daemon CLI (RPC client)",
     after_help = "Examples:\n  duta-cli getpeerinfo\n  duta-cli listbanned\n  duta-cli banpeer 203.0.113.10 launch_abuse\n  duta-cli unbanpeer 203.0.113.10"
 )]

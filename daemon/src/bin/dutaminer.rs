@@ -28,10 +28,12 @@ use duta_core::{dutahash, types::H32};
 use serde::Deserialize;
 use serde_json::json;
 
+const RELEASE_VERSION: &str = "1.0.2-v4.1-rc1";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "dutaminer",
-    version,
+    version = RELEASE_VERSION,
     about = "External PoW miner for dutad /work + /submit_work"
 )]
 struct Args {

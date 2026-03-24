@@ -33,6 +33,7 @@ const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_CYAN: &str = "\x1b[36m";
 const ANSI_WHITE: &str = "\x1b[37m";
+const RELEASE_VERSION: &str = "1.0.2-v4.1-rc1";
 
 fn console_tag(tag: &str, color: &str) -> String {
     format!("{}{}{: <8}{}", ANSI_BOLD, color, tag, ANSI_RESET)
@@ -55,7 +56,7 @@ fn console_line(tag: &str, color: &str, value: impl AsRef<str>) {
 #[derive(Parser, Debug)]
 #[command(
     name = "dutad",
-    version,
+    version = RELEASE_VERSION,
     about = "DUTA full node daemon",
     after_help = "Examples:\n  dutad --daemon\n  dutad status\n  dutad stop\n  duta-cli getpeerinfo\n  duta-cli listbanned\n  duta-cli banpeer 203.0.113.10 launch_abuse\n  duta-cli unbanpeer 203.0.113.10\n  dutad --testnet --daemon"
 )]
