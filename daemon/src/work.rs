@@ -1,5 +1,6 @@
 use crate::p2p;
 use crate::store;
+use crate::submit_work;
 use duta_core::address;
 use duta_core::amount::DUT_PER_DUTA;
 use duta_core::dutahash;
@@ -513,6 +514,22 @@ pub(crate) fn build_work_template(
             return Err("too_many_outstanding_work".to_string());
         }
         map.insert(work_id.clone(), item);
+    }
+
+    submit_work::prewarm_dataset(pow_version, epoch, anchor_hash32, mem_mb);
+    {
+        let anchor_for_store = anchor_hash32;
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            store::prewarm_pow_dataset(pow_version, height, anchor_for_store);
+            wlog!(
+                "[dutad] STORE_DATASET_PREWARM pow_version={} height={} mem_mb={} elapsed_ms={}",
+                pow_version,
+                height,
+                mem_mb,
+                started.elapsed().as_millis()
+            );
+        });
     }
 
     Ok(json!({

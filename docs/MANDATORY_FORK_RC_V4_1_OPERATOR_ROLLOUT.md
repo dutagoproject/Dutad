@@ -6,6 +6,11 @@ Scope:
 - Patched miner: `dutaminer`
 - Network path: mandatory fork candidate `v4.1`
 
+Activation proposal:
+- Mainnet activation height = current mainnet tip + 20,000 blocks when the final release note is published.
+- Do not publish binaries without freezing the exact height in the operator announcement.
+- Minimum operator lead time target: 14 days.
+
 Operator rollout sequence:
 1. Stage patched binaries on every node host.
 2. Back up each production datadir before replacing binaries.
@@ -47,3 +52,9 @@ Incident handling:
   collect logs, preserve datadir, and compare tip/hash with a healthy patched peer.
 - If legacy node is still running after activation:
   treat it as stalled/outdated and upgrade it in place to the patched RC binaries.
+
+Short operator note:
+- Upgrade before the announced activation height.
+- After activation, legacy blocks and legacy miners are rejected by patched nodes.
+- Do not downgrade an activated production datadir back onto legacy binaries.
+- Keep one pre-upgrade datadir backup until the network is stable on the patched chain.

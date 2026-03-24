@@ -302,6 +302,10 @@ fn dataset_for(pow_version: u8, height: u64, anchor_hash32: H32) -> Arc<Vec<u8>>
     ))
 }
 
+pub(crate) fn prewarm_pow_dataset(pow_version: u8, height: u64, anchor_hash32: H32) {
+    let _ = dataset_for(pow_version, height, anchor_hash32);
+}
+
 pub fn work_from_bits(bits: u64) -> u64 {
     if bits >= 63 {
         u64::MAX
@@ -601,7 +605,7 @@ fn verify_pow_consensus(blocks: &sled::Tree, net: Network, b: &ChainBlock) -> Re
         dutahash::pow_digest_for_version(pow_version, &header80, nonce, b.height, anchor, &ds);
 
     let lz = leading_zero_bits(&recomputed);
-    let legacy = if pow_version == dutahash::POW_VERSION_V4 {
+    let legacy = if pow_version == dutahash::POW_VERSION_V4 && recomputed != pow_h {
         let legacy_anchor = anchor_hash32_from_tree(blocks, dutahash::POW_VERSION_V3, b.height);
         let legacy_ds = dataset_for(dutahash::POW_VERSION_V3, b.height, legacy_anchor);
         Some(dutahash::pow_digest_for_version(

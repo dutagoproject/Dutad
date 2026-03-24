@@ -24,7 +24,11 @@ Pre-activation checks:
 - Record release artifact hashes in the RC bundle manifest.
 
 Activation planning checks:
-- Fix activation height per network before publishing binaries.
+- Activation height proposal:
+  mainnet = current mainnet tip + 20,000 blocks at publish time.
+  testnet = immediate/manual for lab only.
+  stagenet = current stagenet tip + 2,000 blocks if used.
+- Freeze the exact mainnet activation height in the final release announcement and manifest before publishing binaries.
 - Publish exact upgrade window and operator deadline.
 - Require patched node deployment before activation height.
 - Require mining operators to switch to patched miner/node path before activation.

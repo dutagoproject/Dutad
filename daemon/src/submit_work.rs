@@ -247,6 +247,33 @@ fn get_dataset_cached(pow_version: u8, epoch: u64, anchor_hash: H32, mem_mb: usi
     ds
 }
 
+pub(crate) fn prewarm_dataset(pow_version: u8, epoch: u64, anchor_hash: H32, mem_mb: usize) {
+    {
+        let g = dataset_cache_lock();
+        if let Some(ent) = g.as_ref() {
+            if ent.pow_version == pow_version
+                && ent.epoch == epoch
+                && ent.anchor_hash == anchor_hash
+                && ent.mem_mb == mem_mb
+            {
+                return;
+            }
+        }
+    }
+
+    thread::spawn(move || {
+        let started = Instant::now();
+        let _ = get_dataset_cached(pow_version, epoch, anchor_hash, mem_mb);
+        wlog!(
+            "[dutad] SUBMIT_DATASET_PREWARM pow_version={} epoch={} mem_mb={} elapsed_ms={}",
+            pow_version,
+            epoch,
+            mem_mb,
+            started.elapsed().as_millis()
+        );
+    });
+}
+
 fn leading_zero_bits(h: &H32) -> u32 {
     let mut n: u32 = 0;
     for &b in h.as_bytes().iter() {
@@ -485,6 +512,7 @@ pub fn handle_submit_work(
     data_dir: &str,
     respond_json: fn(tiny_http::Request, tiny_http::StatusCode, String),
 ) {
+    let request_received = Instant::now();
     let stratum_source = submit_source_is_stratum(&request);
     if request.method() != &tiny_http::Method::Post {
         wlog!("[dutad] SUBMIT_REJECT reason=method_not_allowed");
@@ -498,6 +526,7 @@ pub fn handle_submit_work(
     }
 
     let started = Instant::now();
+    wlog!("[dutad] SUBMIT_STAGE stage=request_received elapsed_ms=0");
 
     let body = match crate::read_body_limited(&mut request) {
         Ok(b) => b,
@@ -515,6 +544,10 @@ pub fn handle_submit_work(
             return;
         }
     };
+    wlog!(
+        "[dutad] SUBMIT_STAGE stage=request_read elapsed_ms={}",
+        request_received.elapsed().as_millis()
+    );
 
     let v: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -529,6 +562,10 @@ pub fn handle_submit_work(
             return;
         }
     };
+    wlog!(
+        "[dutad] SUBMIT_STAGE stage=request_parsed elapsed_ms={}",
+        request_received.elapsed().as_millis()
+    );
 
     let (work_id, nonce) = match parse_submit_payload(&v) {
         Ok(parsed) => parsed,
@@ -559,6 +596,11 @@ pub fn handle_submit_work(
         }
     }
 
+    wlog!(
+        "[dutad] SUBMIT_STAGE stage=verify_start work={} elapsed_ms={}",
+        short_id(work_id),
+        request_received.elapsed().as_millis()
+    );
     let mined_block = match build_mined_block_from_work_nonce(work_id, nonce, true) {
         Ok(v) => v,
         Err(e) if e == "stale_work" => {
@@ -574,7 +616,17 @@ pub fn handle_submit_work(
                 short_id(work_id)
             );
             cache_submit_result(work_id, nonce, 410, &body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=rejected work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             respond_json(request, tiny_http::StatusCode(410), body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=response_sent work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             return;
         }
         Err(e) if e == "pow_invalid" => {
@@ -591,7 +643,17 @@ pub fn handle_submit_work(
                 short_id(work_id)
             );
             cache_submit_result(work_id, nonce, 422, &body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=rejected work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             respond_json(request, tiny_http::StatusCode(422), body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=response_sent work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             return;
         }
         Err(e) => {
@@ -605,10 +667,25 @@ pub fn handle_submit_work(
                 detail
             );
             cache_submit_result(work_id, nonce, status, &body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=rejected work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             respond_json(request, tiny_http::StatusCode(status), body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=response_sent work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             return;
         }
     };
+    wlog!(
+        "[dutad] SUBMIT_STAGE stage=verify_done work={} elapsed_ms={}",
+        short_id(work_id),
+        request_received.elapsed().as_millis()
+    );
 
     let accepted = match accept_mined_block_with_source(data_dir, &mined_block, stratum_source) {
         Ok(v) => v,
@@ -623,10 +700,25 @@ pub fn handle_submit_work(
                 detail
             );
             cache_submit_result(work_id, nonce, status, &body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=rejected work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             respond_json(request, tiny_http::StatusCode(status), body);
+            wlog!(
+                "[dutad] SUBMIT_STAGE stage=response_sent work={} elapsed_ms={}",
+                short_id(work_id),
+                request_received.elapsed().as_millis()
+            );
             return;
         }
     };
+    wlog!(
+        "[dutad] SUBMIT_STAGE stage=accepted work={} elapsed_ms={}",
+        short_id(work_id),
+        request_received.elapsed().as_millis()
+    );
 
     let body = accepted.to_string();
 
@@ -640,6 +732,11 @@ pub fn handle_submit_work(
     cache_submit_result(work_id, nonce, 200, &body);
 
     respond_json(request, tiny_http::StatusCode(200), body);
+    wlog!(
+        "[dutad] SUBMIT_STAGE stage=response_sent work={} elapsed_ms={}",
+        short_id(work_id),
+        request_received.elapsed().as_millis()
+    );
 }
 
 #[cfg(test)]
