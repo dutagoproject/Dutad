@@ -90,7 +90,7 @@ Look for:
 
 ## Operational caution
 
-This repository is on the final `1.0.1` release line, but the usual operational discipline still applies.
+This repository is on the `1.0.2` package line, and the current mandatory RC bundle is `1.0.2-v4.1-rc1`.
 
 That means:
 

@@ -13,7 +13,6 @@ Bundle classification:
 - Wallet binaries must not be presented as part of the mandatory RC main bundle.
 
 Activation proposal:
-- Stable mainnet height observed on public seeds at planning time: `4,400`.
 - Final mainnet activation height: `5,400`.
 - Publish binaries and operator notice with `5,400` as the only activation height.
 

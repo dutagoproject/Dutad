@@ -30,13 +30,13 @@ This produces the binaries under `target\release\`.
 From the repository root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\build_release_bundle.ps1 -Version 1.0.1
+powershell -ExecutionPolicy Bypass -File .\tools\build_release_bundle.ps1 -Version 1.0.2-v4.1-rc1
 ```
 
 The bundle will be created in:
 
 ```text
-dist\duta-release-1.0.1-windows-x86_64
+dist\duta-release-1.0.2-v4.1-rc1-windows-x86_64
 ```
 
 The bundle includes:
@@ -50,7 +50,7 @@ The bundle includes:
 If you want a `windows-gnu` bundle instead of the default MSVC build:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\build_release_bundle.ps1 -Version 1.0.1 -TargetTriple x86_64-pc-windows-gnu
+powershell -ExecutionPolicy Bypass -File .\tools\build_release_bundle.ps1 -Version 1.0.2-v4.1-rc1 -TargetTriple x86_64-pc-windows-gnu
 ```
 
 ## Quick verification
@@ -58,9 +58,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\build_release_bundle.ps1 -Versi
 After the bundle is built, test the binaries directly:
 
 ```powershell
-.\dist\duta-release-1.0.1-windows-x86_64\dutad.exe --help
-.\dist\duta-release-1.0.1-windows-x86_64\duta-cli.exe --help
-.\dist\duta-release-1.0.1-windows-x86_64\dutaminer.exe --help
+.\dist\duta-release-1.0.2-v4.1-rc1-windows-x86_64\dutad.exe --help
+.\dist\duta-release-1.0.2-v4.1-rc1-windows-x86_64\duta-cli.exe --help
+.\dist\duta-release-1.0.2-v4.1-rc1-windows-x86_64\dutaminer.exe --help
 ```
 
 ## Suggested release checklist
@@ -72,4 +72,5 @@ Before publishing a Windows release:
 - verify the main binaries start and print help output
 - confirm `sha256sums.txt` matches the bundled files
 - keep daemon admin RPC private by default in release notes
-- label the release clearly as `1.0.1`
+- label the package version clearly as `1.0.2`
+- label the bundle version clearly as `1.0.2-v4.1-rc1`

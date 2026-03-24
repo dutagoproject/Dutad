@@ -19,7 +19,7 @@ It should not be used as the release status for the current repository state.
 ## Important notes
 
 - this text describes the original beta draft, not the current final release line
-- use the active `1.0.1` release docs elsewhere in this repo for current packaging and operator guidance
+- use the active `1.0.2` release docs elsewhere in this repo for current packaging and operator guidance
 - daemon admin RPC should stay local-only
 - public mining listeners should be exposed deliberately, not by accident
 
