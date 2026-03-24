@@ -14,6 +14,12 @@ Release-candidate freeze:
 - Random dataset reads per step: 4
 - Bits schedule: unchanged from current candidate baseline
 
+Release bundle scope:
+- Mandatory RC main bundle includes only:
+  `dutad`, `duta-cli`, `dutaminer`, `duta-stratumd`, and `duta-stratum-miner`.
+- Wallet binaries are runtime helper binaries only.
+- Wallet binaries are not part of the mandatory RC main bundle claim.
+
 Pre-activation checks:
 - Build Linux release artifacts from the frozen `v4.1` source only.
 - Verify patched node mines and validates `pow_version=4` jobs post-activation.
@@ -47,3 +53,4 @@ RC exit criteria:
 - Legacy-upgrade rejoin proof: PASS
 - Accounting/state/funds proof: PASS
 - Linux RC bundle built and hashed: PASS
+- Main bundle scope and helper-binary scope published without mixing claims: PASS

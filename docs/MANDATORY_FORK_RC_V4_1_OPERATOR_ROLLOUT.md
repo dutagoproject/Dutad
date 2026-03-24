@@ -6,6 +6,12 @@ Scope:
 - Patched miner: `dutaminer`
 - Network path: mandatory fork candidate `v4.1`
 
+Bundle classification:
+- Mandatory RC main bundle includes only:
+  `dutad`, `duta-cli`, `dutaminer`, `duta-stratumd`, and `duta-stratum-miner`.
+- `dutawalletd` and `duta-wallet-cli` are runtime helper binaries only.
+- Wallet binaries must not be presented as part of the mandatory RC main bundle.
+
 Activation proposal:
 - Stable mainnet height observed on public seeds at planning time: `4,400`.
 - Final mainnet activation height: `5,400`.
@@ -15,7 +21,7 @@ Operator rollout sequence:
 1. Stage patched binaries on every node host.
 2. Back up each production datadir before replacing binaries.
 3. Stop legacy `dutad`.
-4. Replace `dutad`, `duta-cli`, and `dutaminer` with the RC bundle artifacts.
+4. Replace `dutad`, `duta-cli`, and `dutaminer` with the mandatory RC main bundle artifacts.
 5. Restart patched `dutad` and confirm:
    - `getblockchaininfo` answers
    - peer count is non-zero
@@ -58,3 +64,4 @@ Short operator note:
 - After activation, legacy blocks and legacy miners are rejected by patched nodes.
 - Do not downgrade an activated production datadir back onto legacy binaries.
 - Keep one pre-upgrade datadir backup until the network is stable on the patched chain.
+- Treat wallet binaries as helper tooling only, not as part of the mandatory RC main bundle claim.
