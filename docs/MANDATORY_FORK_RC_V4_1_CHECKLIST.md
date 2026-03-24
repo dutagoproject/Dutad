@@ -25,10 +25,12 @@ Pre-activation checks:
 
 Activation planning checks:
 - Activation height proposal:
-  mainnet = current mainnet tip + 20,000 blocks at publish time.
+  stable mainnet height observed on public seeds: 4,400.
+  option cepat = 4,800.
+  option aman = 5,400.
   testnet = immediate/manual for lab only.
-  stagenet = current stagenet tip + 2,000 blocks if used.
-- Freeze the exact mainnet activation height in the final release announcement and manifest before publishing binaries.
+  stagenet = separate/manual if used.
+- Freeze one of the two mainnet activation heights in the final release announcement and manifest before publishing binaries.
 - Publish exact upgrade window and operator deadline.
 - Require patched node deployment before activation height.
 - Require mining operators to switch to patched miner/node path before activation.
