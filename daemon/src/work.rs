@@ -16,6 +16,7 @@ use std::sync::{Mutex, OnceLock};
 pub(crate) struct WorkItem {
     pub expires_at: u64,
     pub height: u64,
+    pub pow_version: u8,
     pub prevhash32: String,
     pub merkle32: String,
     pub timestamp: u64,
@@ -460,7 +461,8 @@ pub(crate) fn build_work_template(
     let merkle32 = store::merkle32_from_txids(&ordered_txids)?;
     let header = header80(&prevhash32, &merkle32, ts, bits)?;
 
-    let anchor_h = dutahash::anchor_height(height);
+    let pow_version = netparams::pow_consensus_version(net, height);
+    let anchor_h = dutahash::anchor_height_for_version(pow_version, height);
     let anchor_hash32 = if anchor_h == 0 {
         H32::zero()
     } else {
@@ -469,8 +471,8 @@ pub(crate) fn build_work_template(
             .unwrap_or_else(H32::zero)
     };
 
-    let epoch = dutahash::epoch_number(height);
-    let mem_mb = dutahash::stage_mem_mb(height);
+    let epoch = dutahash::epoch_number_for_version(pow_version, height);
+    let mem_mb = dutahash::stage_mem_mb_for_version(pow_version, height);
     let created_at = ts;
     let expires_at = created_at.saturating_add(30);
 
@@ -485,6 +487,7 @@ pub(crate) fn build_work_template(
     let item = WorkItem {
         expires_at,
         height,
+        pow_version,
         prevhash32: prevhash32.clone(),
         merkle32: merkle32.clone(),
         timestamp: ts,
@@ -517,6 +520,7 @@ pub(crate) fn build_work_template(
         "workid": work_id,
         "expires_at": expires_at,
         "height": height,
+        "pow_version": pow_version,
         "prevhash32": prevhash32,
         "merkle32": merkle32,
         "merkleroot": merkle32,
@@ -539,7 +543,8 @@ pub(crate) fn build_work_template(
         "txs": txs_obj,
         "header80": hex::encode(header),
         "duta": {
-            "algorithm": "duta-pow-v3",
+            "algorithm": netparams::pow_algorithm_name(net, height),
+            "pow_version": pow_version,
             "difficulty_bits": bits,
             "template_address": miner,
             "work_expires_at": expires_at,
@@ -855,6 +860,37 @@ mod tests {
         assert_eq!(
             crate::store::txid_from_value(&embedded).expect("embedded txid"),
             txid
+        );
+    }
+
+    #[test]
+    fn work_template_switches_to_pow_v4_after_activation() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-work-pow-v4-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        store::bootstrap(&data_dir).unwrap();
+
+        let tpl = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+
+        assert_eq!(tpl.get("height").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(tpl.get("pow_version").and_then(|v| v.as_u64()), Some(4));
+        assert_eq!(
+            tpl.get("duta")
+                .and_then(|v| v.get("algorithm"))
+                .and_then(|v| v.as_str()),
+            Some("duta-pow-v4")
         );
     }
 }

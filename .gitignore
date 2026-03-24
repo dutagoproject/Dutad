@@ -4,6 +4,7 @@ docs/_site/
 *.pdb
 *.exe
 *.dll
+*.b64
 *.log
 *.pid
 OUT WORKSPACE/

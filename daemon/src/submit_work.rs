@@ -10,6 +10,7 @@ use std::time::Instant;
 
 #[derive(Clone)]
 struct DatasetCacheEntry {
+    pow_version: u8,
     epoch: u64,
     anchor_hash: H32,
     mem_mb: usize,
@@ -202,19 +203,24 @@ fn parse_submit_payload(v: &serde_json::Value) -> Result<(&str, u64), &'static s
     Ok((work_id, nonce))
 }
 
-fn get_dataset_cached(epoch: u64, anchor_hash: H32, mem_mb: usize) -> Arc<Vec<u8>> {
+fn get_dataset_cached(pow_version: u8, epoch: u64, anchor_hash: H32, mem_mb: usize) -> Arc<Vec<u8>> {
     // Fast path: hit.
     {
         let g = dataset_cache_lock();
         if let Some(ent) = g.as_ref() {
-            if ent.epoch == epoch && ent.anchor_hash == anchor_hash && ent.mem_mb == mem_mb {
+            if ent.pow_version == pow_version
+                && ent.epoch == epoch
+                && ent.anchor_hash == anchor_hash
+                && ent.mem_mb == mem_mb
+            {
                 return ent.dataset.clone();
             }
         }
     }
 
     // Miss: build without holding the lock (expensive).
-    let ds = Arc::new(dutahash::build_dataset_for_epoch(
+    let ds = Arc::new(dutahash::build_dataset_for_version(
+        pow_version,
         epoch,
         anchor_hash,
         mem_mb,
@@ -223,11 +229,16 @@ fn get_dataset_cached(epoch: u64, anchor_hash: H32, mem_mb: usize) -> Arc<Vec<u8
     // Store (double-check in case another thread built it).
     let mut g = dataset_cache_lock();
     if let Some(ent) = g.as_ref() {
-        if ent.epoch == epoch && ent.anchor_hash == anchor_hash && ent.mem_mb == mem_mb {
+        if ent.pow_version == pow_version
+            && ent.epoch == epoch
+            && ent.anchor_hash == anchor_hash
+            && ent.mem_mb == mem_mb
+        {
             return ent.dataset.clone();
         }
     }
     *g = Some(DatasetCacheEntry {
+        pow_version,
         epoch,
         anchor_hash,
         mem_mb,
@@ -433,8 +444,9 @@ pub(crate) fn build_mined_block_from_work_nonce(
     let item = crate::work::peek_work(work_id).ok_or_else(|| "stale_work".to_string())?;
 
     let anchor_hash = H32::from_hex(&item.anchor_hash32).unwrap_or_else(H32::zero);
-    let dataset = get_dataset_cached(item.epoch, anchor_hash, item.mem_mb);
-    let d = dutahash::pow_digest(
+    let dataset = get_dataset_cached(item.pow_version, item.epoch, anchor_hash, item.mem_mb);
+    let d = dutahash::pow_digest_for_version(
+        item.pow_version,
         &item.header,
         nonce,
         item.height,
@@ -731,6 +743,7 @@ mod tests {
             crate::work::WorkItem {
                 expires_at: crate::now_ts().saturating_add(60),
                 height: 1,
+                pow_version: duta_core::dutahash::POW_VERSION_V4,
                 prevhash32: "00".repeat(32),
                 merkle32: "11".repeat(32),
                 timestamp: 1,
@@ -772,5 +785,63 @@ mod tests {
             }
         });
         assert!(sanitize_mempool_value(&mp).is_none());
+    }
+
+    #[test]
+    fn mined_block_builder_uses_pow_v4_work_items() {
+        let work_id = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let header = [0u8; 80];
+        let height = 1u64;
+        let anchor = H32::zero();
+        let epoch = duta_core::dutahash::epoch_number_for_version(
+            duta_core::dutahash::POW_VERSION_V4,
+            height,
+        );
+        let mem_mb = 1usize;
+        let dataset = duta_core::dutahash::build_dataset_for_version(
+            duta_core::dutahash::POW_VERSION_V4,
+            epoch,
+            anchor,
+            mem_mb,
+        );
+
+        let nonce = (0u64..50_000)
+            .find(|nonce| {
+                let digest = duta_core::dutahash::pow_digest_for_version(
+                    duta_core::dutahash::POW_VERSION_V4,
+                    &header,
+                    *nonce,
+                    height,
+                    anchor,
+                    &dataset,
+                );
+                super::leading_zero_bits(&digest) >= 8
+            })
+            .expect("nonce satisfying v4 bits");
+
+        crate::work::insert_test_work(
+            work_id,
+            crate::work::WorkItem {
+                expires_at: crate::now_ts().saturating_add(60),
+                height,
+                pow_version: duta_core::dutahash::POW_VERSION_V4,
+                prevhash32: "00".repeat(32),
+                merkle32: "11".repeat(32),
+                timestamp: 1,
+                bits: 8,
+                chainwork: 1,
+                miner: "miner".to_string(),
+                work_scope: "miner".to_string(),
+                txs_obj: json!({}),
+                header,
+                anchor_hash32: anchor.to_hex(),
+                epoch,
+                mem_mb,
+            },
+        );
+
+        let block = build_mined_block_from_work_nonce(work_id, nonce, false).unwrap();
+        assert_eq!(block.nonce, Some(nonce));
+        assert_eq!(block.hash32, block.pow_digest32.clone().unwrap());
     }
 }

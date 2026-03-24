@@ -161,6 +161,30 @@ pub fn pow_start_bits(net: Network) -> u64 {
     }
 }
 
+pub fn pow_v4_activation_height(net: Network) -> u64 {
+    match net {
+        Network::Mainnet => 180_000,
+        Network::Testnet => 1,
+        Network::Stagenet => 1,
+    }
+}
+
+pub fn pow_consensus_version(net: Network, height: u64) -> u8 {
+    if height >= pow_v4_activation_height(net) {
+        4
+    } else {
+        3
+    }
+}
+
+pub fn pow_algorithm_name(net: Network, height: u64) -> &'static str {
+    match pow_consensus_version(net, height) {
+        3 => "duta-pow-v3",
+        4 => "duta-pow-v4",
+        _ => "duta-pow-unknown",
+    }
+}
+
 pub fn pow_min_bits(_net: Network) -> u64 {
     8
 }
@@ -281,6 +305,31 @@ impl Conf {
         self.map
             .get(&key.to_ascii_lowercase())
             .and_then(|v| v.last().cloned())
+    }
+}
+
+#[cfg(test)]
+mod pow_version_tests {
+    use super::{pow_algorithm_name, pow_consensus_version, pow_v4_activation_height, Network};
+
+    #[test]
+    fn pow_consensus_switches_by_activation_height() {
+        assert_eq!(pow_consensus_version(Network::Mainnet, 179_999), 3);
+        assert_eq!(
+            pow_consensus_version(
+                Network::Mainnet,
+                pow_v4_activation_height(Network::Mainnet)
+            ),
+            4
+        );
+        assert_eq!(pow_consensus_version(Network::Testnet, 0), 3);
+        assert_eq!(pow_consensus_version(Network::Testnet, 1), 4);
+    }
+
+    #[test]
+    fn pow_algorithm_name_tracks_consensus_version() {
+        assert_eq!(pow_algorithm_name(Network::Testnet, 0), "duta-pow-v3");
+        assert_eq!(pow_algorithm_name(Network::Testnet, 1), "duta-pow-v4");
     }
 }
 

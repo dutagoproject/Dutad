@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.1",
+    [string]$Version = "1.0.2-v4.1-rc1",
     [string]$OutputRoot = "dist",
     [switch]$SkipBuild,
     [string]$TargetTriple = "x86_64-pc-windows-msvc"
@@ -74,6 +74,7 @@ foreach ($artifact in $artifacts) {
 $manifest = [ordered]@{
     name = $bundleName
     version = $Version
+    source_commit = (& git rev-parse HEAD)
     generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     workspace = $workspaceRoot
     host_os = "windows"

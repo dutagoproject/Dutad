@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-1.0.1}"
+VERSION="${1:-1.0.2-v4.1-rc1}"
 TARGET_TRIPLE="${2:-x86_64-unknown-linux-gnu}"
 OUTPUT_ROOT="${3:-dist}"
 
@@ -74,11 +74,13 @@ done
 generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 cargo_version="$(cargo --version)"
 rustc_version="$(rustc --version)"
+source_commit="$(git rev-parse HEAD)"
 
 {
   echo "{"
   echo "  \"name\": \"${BUNDLE_NAME}\","
   echo "  \"version\": \"${VERSION}\","
+  echo "  \"source_commit\": \"${source_commit}\","
   echo "  \"generated_at_utc\": \"${generated_at}\","
   echo "  \"workspace\": \"${WORKSPACE_ROOT}\","
   echo "  \"host_os\": \"linux\","

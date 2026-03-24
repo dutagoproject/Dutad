@@ -14,6 +14,7 @@ pub mod hash;
 pub mod netparams;
 pub mod pow;
 pub mod pow_v3;
+pub mod pow_v4;
 pub mod types;
 
 pub use address::{

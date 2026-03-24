@@ -173,7 +173,7 @@ mod tests {
         let h = 0u64;
         let ep = epoch_number(h);
         let anchor = H32([0xaa; 32]);
-        let ds = build_dataset_for_epoch(ep, anchor, 64);
+        let ds = build_dataset_for_epoch(ep, anchor, 1);
         let d = pow_digest(&header, 1, h, anchor, &ds);
         assert_ne!(d.0, [0u8; 32]);
     }

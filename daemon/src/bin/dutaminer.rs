@@ -76,6 +76,7 @@ struct RuntimeArgs {
 struct WorkResp {
     work_id: String,
     height: u64,
+    pow_version: u8,
     bits: u32,
     epoch: u64,
     mem_mb: usize,
@@ -673,7 +674,7 @@ fn main() -> Result<(), String> {
     }
 
     // Dataset cache keyed by (epoch, anchor_hash32, mem_mb)
-    let mut cache_key: Option<(u64, String, usize)> = None;
+    let mut cache_key: Option<(u8, u64, String, usize)> = None;
     let mut cached_dataset: Arc<Vec<u8>> = Arc::new(Vec::new());
 
     let mut rpc = args.rpc.trim_end_matches('/').to_string();
@@ -761,15 +762,15 @@ fn main() -> Result<(), String> {
                 w.height, w.bits, diff_s, w.epoch, w.mem_mb, ttl, w.work_id
             ));
         }
-        let key = (w.epoch, w.anchor_hash32.clone(), w.mem_mb);
+        let key = (w.pow_version, w.epoch, w.anchor_hash32.clone(), w.mem_mb);
         if cache_key.as_ref() != Some(&key) {
             let anchor = H32::from_hex(&w.anchor_hash32).ok_or("bad anchor_hash32 hex")?;
-            let ds = dutahash::build_dataset_for_epoch(w.epoch, anchor, w.mem_mb);
+            let ds = dutahash::build_dataset_for_version(w.pow_version, w.epoch, anchor, w.mem_mb);
             cached_dataset = Arc::new(ds);
             cache_key = Some(key);
             log_miner(format!(
-                "dataset built: epoch={} mem_mb={}",
-                w.epoch, w.mem_mb
+                "dataset built: pow_v{} epoch={} mem_mb={}",
+                w.pow_version, w.epoch, w.mem_mb
             ));
         }
 
@@ -810,7 +811,14 @@ fn main() -> Result<(), String> {
                     if now_unix() >= expires_at {
                         break;
                     }
-                    let d = dutahash::pow_digest(&header, nonce, w.height, anchor, &dataset);
+                    let d = dutahash::pow_digest_for_version(
+                        w.pow_version,
+                        &header,
+                        nonce,
+                        w.height,
+                        anchor,
+                        &dataset,
+                    );
                     local_hashes = local_hashes.wrapping_add(1);
                     if leading_zero_bits(&d) >= bits {
                         found.store(true, Ordering::Relaxed);
@@ -847,7 +855,8 @@ fn main() -> Result<(), String> {
         let hs = total_hashes / elapsed;
         let hs_str = format_hashrate(hs);
 
-        let mined_digest = dutahash::pow_digest(&header, nonce, w.height, anchor, &dataset);
+        let mined_digest =
+            dutahash::pow_digest_for_version(w.pow_version, &header, nonce, w.height, anchor, &dataset);
         let mined_hash32 = mined_digest.to_hex();
 
         log_miner(format!(

@@ -155,9 +155,9 @@ pub fn read_datadir_network(data_dir: &str) -> Option<duta_core::netparams::Netw
 }
 
 // Cached CPUCOIN_POW_V3 dataset (per-epoch) to avoid rebuilding it on every verify.
-static POW_CACHE: OnceLock<Mutex<Option<(u64, H32, Arc<Vec<u8>>)>>> = OnceLock::new();
+static POW_CACHE: OnceLock<Mutex<Option<(u8, u64, H32, usize, Arc<Vec<u8>>)>>> = OnceLock::new();
 
-fn pow_cache() -> &'static Mutex<Option<(u64, H32, Arc<Vec<u8>>)>> {
+fn pow_cache() -> &'static Mutex<Option<(u8, u64, H32, usize, Arc<Vec<u8>>)>> {
     POW_CACHE.get_or_init(|| Mutex::new(None))
 }
 
@@ -259,8 +259,8 @@ pub fn merkle32_from_txids(txids: &[String]) -> Result<String, String> {
     Ok(hex::encode(level[0]))
 }
 
-fn anchor_hash32_from_tree(blocks: &sled::Tree, height: u64) -> H32 {
-    let ah = dutahash::anchor_height(height);
+fn anchor_hash32_from_tree(blocks: &sled::Tree, pow_version: u8, height: u64) -> H32 {
+    let ah = dutahash::anchor_height_for_version(pow_version, height);
     if ah == 0 {
         return H32::zero();
     }
@@ -272,28 +272,30 @@ fn anchor_hash32_from_tree(blocks: &sled::Tree, height: u64) -> H32 {
     H32::zero()
 }
 
-fn dataset_for(height: u64, anchor_hash32: H32) -> Arc<Vec<u8>> {
-    let epoch = dutahash::epoch_number(height);
-    let mem_mb = dutahash::stage_mem_mb(height);
+fn dataset_for(pow_version: u8, height: u64, anchor_hash32: H32) -> Arc<Vec<u8>> {
+    let epoch = dutahash::epoch_number_for_version(pow_version, height);
+    let mem_mb = dutahash::stage_mem_mb_for_version(pow_version, height);
 
     // Fast path: cached epoch+anchor.
     if let Ok(mut g) = pow_cache().lock() {
-        if let Some((ep, a, ds)) = g.as_ref() {
-            if *ep == epoch && *a == anchor_hash32 {
+        if let Some((ver, ep, a, mem, ds)) = g.as_ref() {
+            if *ver == pow_version && *ep == epoch && *a == anchor_hash32 && *mem == mem_mb {
                 return Arc::clone(ds);
             }
         }
-        let ds = Arc::new(dutahash::build_dataset_for_epoch(
+        let ds = Arc::new(dutahash::build_dataset_for_version(
+            pow_version,
             epoch,
             anchor_hash32,
             mem_mb,
         ));
-        *g = Some((epoch, anchor_hash32, Arc::clone(&ds)));
+        *g = Some((pow_version, epoch, anchor_hash32, mem_mb, Arc::clone(&ds)));
         return ds;
     }
 
     // If poisoned, just rebuild without caching.
-    Arc::new(dutahash::build_dataset_for_epoch(
+    Arc::new(dutahash::build_dataset_for_version(
+        pow_version,
         epoch,
         anchor_hash32,
         mem_mb,
@@ -571,6 +573,7 @@ fn verify_pow_consensus(blocks: &sled::Tree, net: Network, b: &ChainBlock) -> Re
     if b.height == 0 {
         return Ok(());
     }
+    let pow_version = netparams::pow_consensus_version(net, b.height);
     let expected_bits = expected_bits_for_next_height(blocks, net, b.height)?;
     if b.bits != expected_bits {
         return Err(format!(
@@ -592,16 +595,51 @@ fn verify_pow_consensus(blocks: &sled::Tree, net: Network, b: &ChainBlock) -> Re
 
     let nonce = b.nonce.ok_or_else(|| "nonce_missing".to_string())?;
     let header80 = header80_from_block(b)?;
-    let anchor = anchor_hash32_from_tree(blocks, b.height);
-    let ds = dataset_for(b.height, anchor);
-    let recomputed = dutahash::pow_digest(&header80, nonce, b.height, anchor, &ds);
+    let anchor = anchor_hash32_from_tree(blocks, pow_version, b.height);
+    let ds = dataset_for(pow_version, b.height, anchor);
+    let recomputed =
+        dutahash::pow_digest_for_version(pow_version, &header80, nonce, b.height, anchor, &ds);
 
-    if recomputed != pow_h {
+    let lz = leading_zero_bits(&recomputed);
+    let legacy = if pow_version == dutahash::POW_VERSION_V4 {
+        let legacy_anchor = anchor_hash32_from_tree(blocks, dutahash::POW_VERSION_V3, b.height);
+        let legacy_ds = dataset_for(dutahash::POW_VERSION_V3, b.height, legacy_anchor);
+        Some(dutahash::pow_digest_for_version(
+            dutahash::POW_VERSION_V3,
+            &header80,
+            nonce,
+            b.height,
+            legacy_anchor,
+            &legacy_ds,
+        ))
+    } else {
+        None
+    };
+
+    classify_pow_outcome(pow_version, b.bits, pow_h, recomputed, lz, legacy)?;
+    Ok(())
+}
+
+fn classify_pow_outcome(
+    pow_version: u8,
+    bits: u64,
+    provided: H32,
+    canonical: H32,
+    canonical_lz: u32,
+    legacy: Option<H32>,
+) -> Result<(), String> {
+    if canonical != provided {
+        if pow_version == dutahash::POW_VERSION_V4 {
+            if let Some(legacy) = legacy {
+                if legacy == provided && leading_zero_bits(&legacy) >= (bits as u32) {
+                    return Err("legacy_pow_after_activation".to_string());
+                }
+            }
+        }
         return Err("pow_mismatch".to_string());
     }
-    let lz = leading_zero_bits(&recomputed);
-    if lz < (b.bits as u32) {
-        return Err(format!("pow_low lz_bits={} need={}", lz, b.bits));
+    if canonical_lz < (bits as u32) {
+        return Err(format!("pow_low lz_bits={} need={}", canonical_lz, bits));
     }
     Ok(())
 }
@@ -2709,5 +2747,37 @@ mod tests_a5 {
         let (tip_h, tip_hash, _tip_cw, _tip_bits) = tip_fields(&data_dir).unwrap();
         assert_eq!(tip_h, 1);
         assert_eq!(tip_hash, block1.hash32);
+    }
+
+    #[test]
+    fn classify_pow_outcome_rejects_legacy_after_activation_lightweight() {
+        let provided = H32([0u8; 32]);
+        let canonical = H32([0xff; 32]);
+        let legacy = H32([0u8; 32]);
+        let err = classify_pow_outcome(
+            duta_core::dutahash::POW_VERSION_V4,
+            8,
+            provided,
+            canonical,
+            0,
+            Some(legacy),
+        )
+        .unwrap_err();
+        assert_eq!(err, "legacy_pow_after_activation");
+    }
+
+    #[test]
+    fn classify_pow_outcome_accepts_matching_canonical_digest_lightweight() {
+        let provided = H32([0u8; 32]);
+        let canonical = H32([0u8; 32]);
+        classify_pow_outcome(
+            duta_core::dutahash::POW_VERSION_V4,
+            8,
+            provided,
+            canonical,
+            256,
+            Some(H32([0xff; 32])),
+        )
+        .unwrap();
     }
 }
