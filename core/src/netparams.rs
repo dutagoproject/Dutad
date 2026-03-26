@@ -169,6 +169,35 @@ pub fn pow_v4_activation_height(net: Network) -> u64 {
     }
 }
 
+pub fn pow_mandatory_recovery_height(net: Network) -> Option<u64> {
+    match net {
+        Network::Mainnet => Some(5_410),
+        Network::Testnet | Network::Stagenet => None,
+    }
+}
+
+pub fn pow_mandatory_recovery_bits(net: Network) -> Option<u64> {
+    match net {
+        Network::Mainnet => Some(22),
+        Network::Testnet | Network::Stagenet => None,
+    }
+}
+
+pub fn pow_mandatory_recovery_window(net: Network) -> u64 {
+    match net {
+        Network::Mainnet => 30,
+        Network::Testnet | Network::Stagenet => 0,
+    }
+}
+
+pub fn pow_mandatory_recovery_active(net: Network, next_height: u64) -> bool {
+    let Some(start) = pow_mandatory_recovery_height(net) else {
+        return false;
+    };
+    let window = pow_mandatory_recovery_window(net);
+    window > 0 && next_height >= start && next_height < start.saturating_add(window)
+}
+
 pub fn pow_consensus_version(net: Network, height: u64) -> u8 {
     if height >= pow_v4_activation_height(net) {
         4
@@ -244,7 +273,10 @@ pub fn pow_launch_difficulty_hardening_enabled(
     current_bits: u64,
 ) -> bool {
     match net {
-        Network::Mainnet => pow_bootstrap_sync_enabled(net, next_height, current_bits),
+        Network::Mainnet => {
+            pow_bootstrap_sync_enabled(net, next_height, current_bits)
+                || pow_mandatory_recovery_active(net, next_height)
+        }
         Network::Testnet | Network::Stagenet => false,
     }
 }
@@ -310,7 +342,11 @@ impl Conf {
 
 #[cfg(test)]
 mod pow_version_tests {
-    use super::{pow_algorithm_name, pow_consensus_version, pow_v4_activation_height, Network};
+    use super::{
+        pow_algorithm_name, pow_consensus_version, pow_mandatory_recovery_active,
+        pow_mandatory_recovery_bits, pow_mandatory_recovery_height,
+        pow_mandatory_recovery_window, pow_v4_activation_height, Network,
+    };
 
     #[test]
     fn pow_consensus_switches_by_activation_height() {
@@ -330,6 +366,19 @@ mod pow_version_tests {
     fn pow_algorithm_name_tracks_consensus_version() {
         assert_eq!(pow_algorithm_name(Network::Testnet, 0), "duta-pow-v3");
         assert_eq!(pow_algorithm_name(Network::Testnet, 1), "duta-pow-v4");
+    }
+
+    #[test]
+    fn mandatory_recovery_window_is_mainnet_only_and_bounded() {
+        let start = pow_mandatory_recovery_height(Network::Mainnet).unwrap();
+        let bits = pow_mandatory_recovery_bits(Network::Mainnet).unwrap();
+        assert_eq!(bits, 22);
+        assert_eq!(pow_mandatory_recovery_window(Network::Mainnet), 30);
+        assert!(pow_mandatory_recovery_active(Network::Mainnet, start));
+        assert!(pow_mandatory_recovery_active(Network::Mainnet, start + 29));
+        assert!(!pow_mandatory_recovery_active(Network::Mainnet, start + 30));
+        assert_eq!(pow_mandatory_recovery_height(Network::Testnet), None);
+        assert_eq!(pow_mandatory_recovery_height(Network::Stagenet), None);
     }
 }
 
