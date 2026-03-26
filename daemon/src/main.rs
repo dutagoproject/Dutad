@@ -2393,6 +2393,12 @@ fn main() {
         eprintln!("daemon: BOOTSTRAP_FAIL data={} err={}", data_dir, e);
         std::process::exit(1);
     }
+    let reconciled_mempool = submit_tx::reconcile_confirmed_mempool_file(&data_dir);
+    edlog!(
+        "daemon: MEMPOOL_RECONCILE_STARTUP data={} changed={}",
+        data_dir,
+        reconciled_mempool
+    );
 
     let mining_log = mining_addr.as_deref().unwrap_or("-");
     print_startup_banner(net, &data_dir, &p2p_addr, &rpc_addr, mining_addr.as_deref());

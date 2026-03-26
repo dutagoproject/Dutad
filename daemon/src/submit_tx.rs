@@ -289,6 +289,85 @@ pub fn prune_confirmed_txids_from_mempool_file(data_dir: &str, txids: &[String])
     }
 }
 
+fn txid_is_confirmed_in_chain(data_dir: &str, txid: &str) -> bool {
+    let tip_h = crate::store::tip_fields(data_dir)
+        .map(|(height, _, _, _)| height)
+        .unwrap_or(0);
+    for h in (0..=tip_h).rev() {
+        let Some(block) = crate::store::block_at(data_dir, h) else {
+            continue;
+        };
+        let Some(txs) = block.txs.as_ref().and_then(|v| v.as_object()) else {
+            continue;
+        };
+        if txs.contains_key(txid) {
+            return true;
+        }
+    }
+    false
+}
+
+fn reconcile_confirmed_txs_against_chain(data_dir: &str, mp: &mut serde_json::Value) -> bool {
+    let Some(txs_obj) = mp.get("txs").and_then(|x| x.as_object()) else {
+        return false;
+    };
+    let confirmed: Vec<String> = txs_obj
+        .keys()
+        .filter(|txid| txid_is_confirmed_in_chain(data_dir, txid))
+        .cloned()
+        .collect();
+    if confirmed.is_empty() {
+        return false;
+    }
+    for txid in &confirmed {
+        let _ = remove_tx_from_mempool(mp, txid);
+        if mp["orphans"]["txs"]
+            .as_object_mut()
+            .map(|o| o.remove(txid).is_some())
+            .unwrap_or(false)
+        {}
+        if mp["orphans"]["meta"]
+            .as_object_mut()
+            .map(|o| o.remove(txid).is_some())
+            .unwrap_or(false)
+        {}
+    }
+    if let Some(old) = mp["orphans"]["txids"].as_array() {
+        let keep: Vec<serde_json::Value> = old
+            .iter()
+            .filter_map(|v| {
+                let txid = v.as_str()?;
+                if confirmed.iter().any(|done| done == txid) {
+                    None
+                } else {
+                    Some(json!(txid))
+                }
+            })
+            .collect();
+        mp["orphans"]["txids"] = serde_json::Value::Array(keep);
+    }
+    rebuild_mempool_txids(mp);
+    true
+}
+
+pub fn reconcile_confirmed_mempool_file(data_dir: &str) -> bool {
+    let path = mempool_path(data_dir);
+    let s = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut mp = match serde_json::from_str::<serde_json::Value>(&s) {
+        Ok(v) => sanitize_mempool_value(&v).unwrap_or(v),
+        Err(_) => return false,
+    };
+    ensure_orphan_shape(&mut mp);
+    let changed = reconcile_confirmed_txs_against_chain(data_dir, &mut mp);
+    if changed {
+        let _ = save_mempool(data_dir, &mp);
+    }
+    changed
+}
+
 fn orphan_try_promote(data_dir: &str, mp: &mut serde_json::Value) -> Vec<String> {
     ensure_orphan_shape(mp);
     let txids = mp["orphans"]["txids"]
@@ -947,8 +1026,9 @@ pub fn handle_submit_tx(
 mod tests {
     use super::{
         enforce_mempool_caps, ingest_tx_p2p, load_mempool, parse_submit_tx_request,
-        prune_confirmed_txids_from_mempool_file, rebuild_mempool_txids, sanitize_mempool_value,
-        save_mempool, txid_from_value, txid_is_valid,
+        prune_confirmed_txids_from_mempool_file, rebuild_mempool_txids,
+        reconcile_confirmed_mempool_file, sanitize_mempool_value, save_mempool, txid_from_value,
+        txid_is_valid,
     };
     use duta_core::address;
     use ed25519_dalek::{Signer, SigningKey};
@@ -1177,6 +1257,57 @@ mod tests {
         assert_eq!(updated["orphans"]["txids"], json!([orphan_txid]));
         assert!(updated["orphans"]["txs"].get(&txid).is_none());
         assert!(updated["orphans"]["meta"].get(&txid).is_none());
+    }
+
+    #[test]
+    fn reconcile_confirmed_mempool_file_prunes_confirmed_txids_from_stale_file() {
+        let data_dir = temp_datadir("load-mempool-confirmed-reconcile");
+        crate::store::ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+
+        let tx = json!({
+            "vin":[{"txid":"a","vout":0}],
+            "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}],
+            "fee": 1000,
+            "size": 123
+        });
+        let mut tx_for_id = tx.clone();
+        tx_for_id.as_object_mut().expect("tx object").remove("size");
+        let txid = txid_from_value(&tx_for_id).expect("canonical txid");
+        let merkle = crate::store::merkle32_from_txids(std::slice::from_ref(&txid)).unwrap();
+
+        let chain = vec![json!({
+            "height": 1,
+            "hash32": "11".repeat(32),
+            "bits": duta_core::netparams::pow_start_bits(duta_core::Network::Mainnet),
+            "chainwork": 1,
+            "timestamp": 1_700_000_000u64,
+            "prevhash32": duta_core::netparams::genesis_hash(duta_core::Network::Mainnet),
+            "merkle32": merkle,
+            "nonce": 1u64,
+            "miner": "dut1miner",
+            "txs": {
+                txid.clone(): tx_for_id.clone()
+            }
+        })];
+        std::fs::write(
+            format!("{}/chain.json", data_dir),
+            serde_json::to_string(&chain).unwrap(),
+        )
+        .unwrap();
+        crate::store::bootstrap(&data_dir).unwrap();
+
+        let mp = json!({
+            "txids": [txid.clone()],
+            "txs": {
+                txid.clone(): tx
+            }
+        });
+        save_mempool(&data_dir, &mp).expect("save stale mempool");
+
+        assert!(reconcile_confirmed_mempool_file(&data_dir));
+        let updated = load_mempool(&data_dir);
+        assert_eq!(updated["txids"], json!([]));
+        assert!(updated["txs"].get(&txid).is_none());
     }
 
     #[test]

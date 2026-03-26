@@ -3,7 +3,6 @@ use duta_core::amount::{BASE_UNIT, DEFAULT_MIN_RELAY_FEE_PER_KB_DUT, DISPLAY_UNI
 use duta_core::netparams::{genesis_hash, pow_start_bits, Network};
 use duta_core::types::H32;
 use serde_json::json;
-use std::fs;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -67,7 +66,7 @@ fn as_str(v: &serde_json::Value) -> Option<&str> {
 
 fn mempool_value(data_dir: &str) -> serde_json::Value {
     let path = format!("{}/mempool.json", data_dir.trim_end_matches('/'));
-    let s = match fs::read_to_string(&path) {
+    let s = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return json!({"txids": [], "txs": {}}),
     };
