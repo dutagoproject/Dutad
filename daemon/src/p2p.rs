@@ -1591,6 +1591,9 @@ fn outbound_peer_quality(addr: &str) -> i64 {
     let Some(peer) = peers.get(addr) else {
         return if official_backbone { 1_000_000 } else { 0 };
     };
+    if outbound_peer_skip_reason(peer).is_some() {
+        return i64::MIN / 4;
+    }
     let recency_bonus = if peer.last_seen_at.elapsed() <= Duration::from_secs(15 * 60) {
         3
     } else if peer.last_seen_at.elapsed() <= Duration::from_secs(60 * 60) {
@@ -3951,6 +3954,30 @@ mod tests {
         assert_eq!(
             super::outbound_peer_should_skip("158.140.176.172:19082"),
             Some("stale_tip".to_string())
+        );
+    }
+
+    #[test]
+    fn outbound_stale_tip_peer_quality_is_demoted_below_fresh_peers() {
+        clear_test_peer_state();
+        super::BEST_SEEN_HEIGHT.store(5644, Ordering::Relaxed);
+        super::note_outbound_peer_result(
+            "38.190.227.49:19082",
+            true,
+            Some(5433),
+            Some(&"11".repeat(32)),
+            None,
+        );
+        super::note_outbound_peer_result(
+            "213.199.44.138:19082",
+            true,
+            Some(5644),
+            Some(&"22".repeat(32)),
+            None,
+        );
+        assert!(
+            super::outbound_peer_quality("38.190.227.49:19082")
+                < super::outbound_peer_quality("213.199.44.138:19082")
         );
     }
 
