@@ -4,13 +4,14 @@
 
 It contains the chain-critical parts of the project: consensus rules, block and transaction validation, storage, daemon RPC, P2P networking, and the built-in solo mining flow.
 
-Current release line: `1.0.2`
+Current release line: `1.0.3`
 
-Release `1.0.2` focus:
+Release `1.0.3` focus:
 
-- transaction relay and mempool visibility are more consistent across nodes
-- sync/apply state now self-heals stale tip metadata so stuck nodes can catch up again
-- confirmed transactions are pruned from mempool more reliably and raw transaction lookup stays consistent after confirmation
+- public peer handling is hardened so random inbound peers do not contaminate backbone outbound state
+- reorg candidates are validated before rollback, so bad public chains cannot drag a live node backward first
+- peer persistence is more durable and no longer leaves `peers.txt.tmp.*` garbage behind on failed writes
+- the release bundle is aligned around the `1.0.3` daemon, CLI, solo miner, and matching bootstrap snapshot
 
 Website: https://dutago.xyz
 
@@ -75,3 +76,4 @@ If you need a public mining bridge, use the `stratum` repository.
 - Security notes: [docs/SECURITY_NOTES.md](./docs/SECURITY_NOTES.md)
 - Linux release flow: [docs/RELEASE_LINUX.md](./docs/RELEASE_LINUX.md)
 - Windows release flow: [docs/RELEASE_WINDOWS.md](./docs/RELEASE_WINDOWS.md)
+- Historical beta notes: [docs/RELEASE_DOWNLOAD_0.0.1-beta.md](./docs/RELEASE_DOWNLOAD_0.0.1-beta.md)

@@ -17,15 +17,16 @@ For each release, download the bundle that matches your platform:
 
 Also keep:
 
-- `manifest.json`
-- `sha256sums.txt`
+- `SHA256SUMS.txt`
+- the release notes or operator guide that came with the bundle
+- `chain5644.zip` if you want to start from the published bootstrap snapshot
 
 ## Verify the checksums
 
 On Linux:
 
 ```bash
-sha256sum -c sha256sums.txt
+sha256sum -c SHA256SUMS.txt
 ```
 
 On Windows:
@@ -36,15 +37,15 @@ certutil -hashfile duta-cli.exe SHA256
 certutil -hashfile dutaminer.exe SHA256
 ```
 
-Compare the output to `sha256sums.txt`.
+Compare the output to `SHA256SUMS.txt`.
 
 ## Linux install example
 
 Extract the archive:
 
 ```bash
-tar -xzf duta-release-1.0.2-v4.1-rc1-linux-x86_64.tar.gz
-cd duta-release-1.0.2-v4.1-rc1-linux-x86_64
+tar -xzf duta-release-1.0.3-linux-x86_64.tar.gz
+cd duta-release-1.0.3-linux-x86_64
 ```
 
 Install the binaries:
@@ -61,6 +62,8 @@ Create the data directory:
 mkdir -p /root/.duta
 chmod 700 /root/.duta
 ```
+
+If you are using the published bootstrap snapshot, extract `chain5644.zip` into the datadir before first start.
 
 Then continue with [Linux service deployment](DEPLOY_LINUX_SERVICES.md).
 
@@ -101,6 +104,6 @@ C:\DUTA\dutaminer.exe
 
 ## Important notes
 
-- use only binaries that match the final mainnet release
+- use only binaries and checksums that belong to the same final release bundle
 - keep daemon admin RPC local-only
 - expose the mining port only if you mean to serve external miners
