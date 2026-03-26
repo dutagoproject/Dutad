@@ -171,33 +171,12 @@ const MIN_POLL_MS: u64 = 50;
 const SYNC_BACKOFF_MS: u64 = 2_000;
 const BUSY_BACKOFF_MS: u64 = 1_000;
 const RPC_TIMEOUT_SECS: u64 = 5;
-const MIN_LOCAL_WORK_TTL_SECS: u64 = 10;
-const MIN_LOCAL_WORK_TTL_HIGH_BITS_SECS: u64 = 60;
 
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_secs()
-}
-
-fn min_local_work_ttl_secs(bits: u32) -> u64 {
-    if bits >= 20 {
-        MIN_LOCAL_WORK_TTL_HIGH_BITS_SECS
-    } else {
-        MIN_LOCAL_WORK_TTL_SECS
-    }
-}
-
-fn effective_work_expires_at(server_expires_at: u64, bits: u32) -> u64 {
-    let now = now_unix();
-    let ttl = server_expires_at.saturating_sub(now);
-    let min_ttl = min_local_work_ttl_secs(bits);
-    if ttl >= min_ttl {
-        server_expires_at
-    } else {
-        now.saturating_add(min_ttl)
-    }
 }
 
 fn leading_zero_bits(h: &H32) -> u32 {
@@ -754,8 +733,7 @@ fn main() -> Result<(), String> {
             }
         };
 
-        let effective_expires_at = effective_work_expires_at(w.expires_at, w.bits);
-        let ttl = effective_expires_at.saturating_sub(now_unix());
+        let ttl = w.expires_at.saturating_sub(now_unix());
         {
             let diff = expected_hashes(w.bits).unwrap_or(0);
             let diff_s = format_hash_units(diff);
@@ -795,7 +773,7 @@ fn main() -> Result<(), String> {
         let found_nonce: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let dataset = cached_dataset.clone();
         let threads = args.threads;
-        let expires_at = effective_expires_at;
+        let expires_at = w.expires_at;
         let bits = w.bits;
 
         let mut handles = Vec::with_capacity(threads);
