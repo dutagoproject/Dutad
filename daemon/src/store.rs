@@ -419,13 +419,19 @@ fn expected_bits_for_next_height(
         pow_mandatory_recovery_height(net),
         pow_mandatory_recovery_bits(net),
     ) {
-        if next_height == recovery_h {
-            return Ok(bits.min(recovery_bits).clamp(min_bits, max_bits));
-        }
-        if next_height > recovery_h
-            && next_height < recovery_h.saturating_add(duta_core::netparams::pow_mandatory_recovery_window(net))
-        {
-            return Ok(recovery_bits.clamp(min_bits, max_bits));
+        let recovery_window = duta_core::netparams::pow_mandatory_recovery_window(net);
+        let recovery_end = recovery_h.saturating_add(recovery_window);
+        if next_height >= recovery_h && next_height < recovery_end {
+            let stage_bits = if next_height < recovery_h + 5 {
+                recovery_bits
+            } else if next_height < recovery_h + 10 {
+                recovery_bits + 1
+            } else if next_height < recovery_h + 15 {
+                recovery_bits + 2
+            } else {
+                recovery_bits + 3
+            };
+            return Ok(stage_bits.clamp(min_bits, max_bits));
         }
     }
     let sync_gate = pow_launch_difficulty_hardening_enabled(net, next_height, bits);
@@ -2781,7 +2787,7 @@ mod tests_a5 {
     }
 
     #[test]
-    fn mandatory_recovery_forces_bits_18_at_recovery_height() {
+    fn mandatory_recovery_forces_bits_19_at_recovery_height() {
         let data_dir = temp_datadir("mandatory-recovery-r");
         ensure_datadir_meta(&data_dir, "mainnet").unwrap();
         bootstrap(&data_dir).unwrap();
@@ -2816,18 +2822,18 @@ mod tests_a5 {
         set_tip_fields_db(&meta, recovery_h - 1, prev_hash, cw, 34).unwrap();
         db.flush().unwrap();
 
-        assert_eq!(expected_bits_next(&data_dir).unwrap(), 18);
+        assert_eq!(expected_bits_next(&data_dir).unwrap(), 19);
     }
 
     #[test]
-    fn mandatory_recovery_returns_to_normal_after_r_plus_29() {
+    fn mandatory_recovery_returns_to_normal_after_r_plus_19() {
         let data_dir = temp_datadir("mandatory-recovery-exit");
         ensure_datadir_meta(&data_dir, "mainnet").unwrap();
         bootstrap(&data_dir).unwrap();
 
         let recovery_h = duta_core::netparams::pow_mandatory_recovery_height(Network::Mainnet)
             .expect("mainnet recovery height");
-        let recovery_end = recovery_h + 29;
+        let recovery_end = recovery_h + 19;
         let db = open_db(&data_dir).unwrap();
         let meta = tree_meta(&db).unwrap();
         let blocks = tree_blocks(&db).unwrap();
@@ -2835,7 +2841,17 @@ mod tests_a5 {
         let mut prev_hash = genesis_hash(Network::Mainnet).to_string();
         let mut cw = 0u64;
         for h in 1..=recovery_end {
-            let bits = if h < recovery_h { 34 } else { 21 };
+            let bits = if h < recovery_h {
+                34
+            } else if h < recovery_h + 5 {
+                19
+            } else if h < recovery_h + 10 {
+                20
+            } else if h < recovery_h + 15 {
+                21
+            } else {
+                22
+            };
             cw = cw.saturating_add(work_from_bits(bits));
             let block = ChainBlock {
                 height: h,
@@ -2856,11 +2872,11 @@ mod tests_a5 {
         set_tip_fields_db(&meta, recovery_end, prev_hash, cw, 21).unwrap();
         db.flush().unwrap();
 
-        assert_eq!(expected_bits_next(&data_dir).unwrap(), 21);
+        assert_eq!(expected_bits_next(&data_dir).unwrap(), 22);
     }
 
     #[test]
-    fn mandatory_recovery_holds_bits_18_through_window() {
+    fn mandatory_recovery_stages_bits_through_window() {
         let data_dir = temp_datadir("mandatory-recovery-hold");
         ensure_datadir_meta(&data_dir, "mainnet").unwrap();
         bootstrap(&data_dir).unwrap();
@@ -2874,7 +2890,7 @@ mod tests_a5 {
         let mut prev_hash = genesis_hash(Network::Mainnet).to_string();
         let mut cw = 0u64;
         for h in 1..=recovery_h {
-            let bits = if h < recovery_h { 34 } else { 18 };
+            let bits = if h < recovery_h { 34 } else { 19 };
             cw = cw.saturating_add(work_from_bits(bits));
             let block = ChainBlock {
                 height: h,
@@ -2892,10 +2908,57 @@ mod tests_a5 {
             put_block_db(&blocks, &block).unwrap();
             prev_hash = block.hash32.clone();
         }
-        set_tip_fields_db(&meta, recovery_h, prev_hash, cw, 18).unwrap();
+        set_tip_fields_db(&meta, recovery_h, prev_hash, cw, 19).unwrap();
         db.flush().unwrap();
 
-        assert_eq!(expected_bits_next(&data_dir).unwrap(), 18);
+        assert_eq!(expected_bits_next(&data_dir).unwrap(), 19);
+    }
+
+    #[test]
+    fn mandatory_recovery_advances_stage_floors() {
+        let data_dir = temp_datadir("mandatory-recovery-stage-floors");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        bootstrap(&data_dir).unwrap();
+
+        let recovery_h = duta_core::netparams::pow_mandatory_recovery_height(Network::Mainnet)
+            .expect("mainnet recovery height");
+        let db = open_db(&data_dir).unwrap();
+        let meta = tree_meta(&db).unwrap();
+        let blocks = tree_blocks(&db).unwrap();
+
+        let mut prev_hash = genesis_hash(Network::Mainnet).to_string();
+        let mut cw = 0u64;
+        for h in 1..=(recovery_h + 14) {
+            let bits = if h < recovery_h {
+                34
+            } else if h < recovery_h + 5 {
+                19
+            } else if h < recovery_h + 10 {
+                20
+            } else {
+                21
+            };
+            cw = cw.saturating_add(work_from_bits(bits));
+            let block = ChainBlock {
+                height: h,
+                hash32: format!("{:064x}", 700_000 + h),
+                bits,
+                chainwork: cw,
+                timestamp: Some(h.saturating_mul(pow_target_secs(Network::Mainnet))),
+                prevhash32: Some(prev_hash.clone()),
+                merkle32: Some(format!("{:064x}", 800_000 + h)),
+                nonce: Some(0),
+                miner: Some("miner-stage".to_string()),
+                pow_digest32: Some(format!("{:064x}", 900_000 + h)),
+                txs: None,
+            };
+            put_block_db(&blocks, &block).unwrap();
+            prev_hash = block.hash32.clone();
+        }
+        set_tip_fields_db(&meta, recovery_h + 14, prev_hash, cw, 21).unwrap();
+        db.flush().unwrap();
+
+        assert_eq!(expected_bits_next(&data_dir).unwrap(), 22);
     }
 
     #[test]

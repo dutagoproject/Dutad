@@ -171,21 +171,21 @@ pub fn pow_v4_activation_height(net: Network) -> u64 {
 
 pub fn pow_mandatory_recovery_height(net: Network) -> Option<u64> {
     match net {
-        Network::Mainnet => Some(5_405),
+        Network::Mainnet => Some(6_500),
         Network::Testnet | Network::Stagenet => None,
     }
 }
 
 pub fn pow_mandatory_recovery_bits(net: Network) -> Option<u64> {
     match net {
-        Network::Mainnet => Some(18),
+        Network::Mainnet => Some(19),
         Network::Testnet | Network::Stagenet => None,
     }
 }
 
 pub fn pow_mandatory_recovery_window(net: Network) -> u64 {
     match net {
-        Network::Mainnet => 30,
+        Network::Mainnet => 20,
         Network::Testnet | Network::Stagenet => 0,
     }
 }
@@ -369,12 +369,12 @@ mod pow_version_tests {
     fn mandatory_recovery_window_is_mainnet_only_and_bounded() {
         let start = pow_mandatory_recovery_height(Network::Mainnet).unwrap();
         let bits = pow_mandatory_recovery_bits(Network::Mainnet).unwrap();
-        assert_eq!(start, 5_405);
-        assert_eq!(bits, 18);
-        assert_eq!(pow_mandatory_recovery_window(Network::Mainnet), 30);
+        assert_eq!(start, 6_500);
+        assert_eq!(bits, 19);
+        assert_eq!(pow_mandatory_recovery_window(Network::Mainnet), 20);
         assert!(pow_mandatory_recovery_active(Network::Mainnet, start));
-        assert!(pow_mandatory_recovery_active(Network::Mainnet, start + 29));
-        assert!(!pow_mandatory_recovery_active(Network::Mainnet, start + 30));
+        assert!(pow_mandatory_recovery_active(Network::Mainnet, start + 19));
+        assert!(!pow_mandatory_recovery_active(Network::Mainnet, start + 20));
         assert_eq!(pow_mandatory_recovery_height(Network::Testnet), None);
         assert_eq!(pow_mandatory_recovery_height(Network::Stagenet), None);
     }
