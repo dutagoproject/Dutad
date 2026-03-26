@@ -1514,13 +1514,38 @@ fn peer_snapshot_json(peer: &PeerSnapshot) -> serde_json::Value {
     })
 }
 
-fn outbound_peer_skip_reason(peer: &PeerSnapshot) -> Option<&'static str> {
-    let stale_best_seen = best_seen_height();
-    if stale_best_seen > 0
+fn stale_outbound_lineage_skip_reason(
+    peer: &PeerSnapshot,
+    best_seen: u64,
+    local_hash_at_peer_tip: Option<&str>,
+) -> Option<&'static str> {
+    if best_seen > 0
         && peer.last_tip_height > 0
-        && stale_best_seen >= peer.last_tip_height.saturating_add(OUTBOUND_STALE_TIP_LAG_BLOCKS)
+        && best_seen >= peer.last_tip_height.saturating_add(OUTBOUND_STALE_TIP_LAG_BLOCKS)
     {
-        return Some("stale_tip");
+        if let (Some(peer_hash32), Some(local_hash32)) =
+            (peer.last_tip_hash32.as_deref(), local_hash_at_peer_tip)
+        {
+            if !peer_hash32.eq_ignore_ascii_case(local_hash32) {
+                return Some("wrong_lineage");
+            }
+        }
+    }
+    None
+}
+
+fn outbound_peer_skip_reason(addr: &str, peer: &PeerSnapshot) -> Option<&'static str> {
+    let local_hash_at_peer_tip = cfg().and_then(|cfg| {
+        let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
+        if is_launch_backbone_peer_for_net(net, addr) {
+            return None;
+        }
+        canonical_hash_at_or_genesis(&cfg.data_dir, net, peer.last_tip_height)
+    });
+    if let Some(reason) =
+        stale_outbound_lineage_skip_reason(peer, best_seen_height(), local_hash_at_peer_tip.as_deref())
+    {
+        return Some(reason);
     }
     let cooldown_secs = if peer
         .last_error
@@ -1567,7 +1592,7 @@ fn outbound_peer_should_skip(addr: &str) -> Option<String> {
     };
     peers
         .get(addr)
-        .and_then(outbound_peer_skip_reason)
+        .and_then(|peer| outbound_peer_skip_reason(addr, peer))
         .map(|s| s.to_string())
 }
 
@@ -1591,7 +1616,7 @@ fn outbound_peer_quality(addr: &str) -> i64 {
     let Some(peer) = peers.get(addr) else {
         return if official_backbone { 1_000_000 } else { 0 };
     };
-    if outbound_peer_skip_reason(peer).is_some() {
+    if outbound_peer_skip_reason(addr, peer).is_some() {
         return i64::MIN / 4;
     }
     let recency_bonus = if peer.last_seen_at.elapsed() <= Duration::from_secs(15 * 60) {
@@ -1815,7 +1840,9 @@ fn outbound_quarantined_peers_json() -> Vec<serde_json::Value> {
                 .map(|net| !is_launch_backbone_peer_for_net(net, &peer.addr))
                 .unwrap_or(true)
         })
-        .filter_map(|peer| outbound_peer_skip_reason(peer).map(|reason| (peer.clone(), reason)))
+        .filter_map(|peer| {
+            outbound_peer_skip_reason(&peer.addr, peer).map(|reason| (peer.clone(), reason))
+        })
         .collect();
     out.sort_by_key(|(peer, _)| std::cmp::Reverse(peer.last_seen_at));
     out.truncate(OUTBOUND_BAD_PEER_MAX_EXPOSED);
@@ -3881,9 +3908,10 @@ mod tests {
         is_transient_dial_error, list_banned_json, normalize_bootstrap_candidates,
         official_tip_sync_from, parse_peers_text, peer_tip_sync_request_from, read_line_limited,
         reorg_overlap_from, should_accept_reorg_candidate,
-        should_prefer_backbone_tie_candidate, subnet24_key, sync_gate_local_submit_ready,
-        sync_gate_mining_ready, treat_sync_read_timeout_as_clean_close, unban_peer_manual,
-        validate_block_basic, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
+        should_prefer_backbone_tie_candidate, stale_outbound_lineage_skip_reason, subnet24_key,
+        sync_gate_local_submit_ready, sync_gate_mining_ready,
+        treat_sync_read_timeout_as_clean_close, unban_peer_manual, validate_block_basic,
+        PeerSnapshot, MAX_BLOCKS_PER_MSG, MAX_LINE_BYTES,
     };
     use crate::ChainBlock;
     use duta_core::netparams::{self, Network};
@@ -3941,43 +3969,24 @@ mod tests {
     }
 
     #[test]
-    fn outbound_stale_tip_peer_is_immediately_skip_eligible() {
-        clear_test_peer_state();
-        super::BEST_SEEN_HEIGHT.store(5644, Ordering::Relaxed);
-        super::note_outbound_peer_result(
-            "158.140.176.172:19082",
-            true,
-            Some(5423),
-            Some(&"11".repeat(32)),
-            None,
-        );
+    fn outbound_wrong_lineage_peer_is_skip_eligible() {
+        let mut peer = PeerSnapshot::new("158.140.176.172:19082", false);
+        peer.last_tip_height = 5423;
+        peer.last_tip_hash32 = Some("11".repeat(32));
         assert_eq!(
-            super::outbound_peer_should_skip("158.140.176.172:19082"),
-            Some("stale_tip".to_string())
+            stale_outbound_lineage_skip_reason(&peer, 5644, Some(&"22".repeat(32))),
+            Some("wrong_lineage")
         );
     }
 
     #[test]
-    fn outbound_stale_tip_peer_quality_is_demoted_below_fresh_peers() {
-        clear_test_peer_state();
-        super::BEST_SEEN_HEIGHT.store(5644, Ordering::Relaxed);
-        super::note_outbound_peer_result(
-            "38.190.227.49:19082",
-            true,
-            Some(5433),
-            Some(&"11".repeat(32)),
-            None,
-        );
-        super::note_outbound_peer_result(
-            "213.199.44.138:19082",
-            true,
-            Some(5644),
-            Some(&"22".repeat(32)),
-            None,
-        );
-        assert!(
-            super::outbound_peer_quality("38.190.227.49:19082")
-                < super::outbound_peer_quality("213.199.44.138:19082")
+    fn outbound_same_lineage_peer_is_not_skip_eligible_just_for_lag() {
+        let mut peer = PeerSnapshot::new("38.190.227.49:19082", false);
+        peer.last_tip_height = 5433;
+        peer.last_tip_hash32 = Some("11".repeat(32));
+        assert_eq!(
+            stale_outbound_lineage_skip_reason(&peer, 5644, Some(&"11".repeat(32))),
+            None
         );
     }
 
