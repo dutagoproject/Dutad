@@ -99,6 +99,64 @@ fn hello_genesis_hash(net: &str) -> String {
     netparams::genesis_hash(network).to_string()
 }
 
+fn canonical_hash_at_or_genesis(data_dir: &str, network: Network, height: u64) -> Option<String> {
+    if height == 0 {
+        Some(netparams::genesis_hash(network).to_string())
+    } else {
+        store::block_at(data_dir, height).map(|b| b.hash32)
+    }
+}
+
+fn discover_batch_forkpoint<F>(
+    network: Network,
+    tip_h: u64,
+    blocks: &[ChainBlock],
+    mut local_hash_at_or_genesis: F,
+) -> Option<(u64, usize)>
+where
+    F: FnMut(u64) -> Option<String>,
+{
+    let window_start = tip_h.saturating_sub(store::REORG_UNDO_WINDOW);
+    let genesis_hash = netparams::genesis_hash(network).to_string();
+    let mut fp_height: Option<u64> = None;
+    let mut fp_index: Option<usize> = None;
+
+    for (i, b) in blocks.iter().enumerate() {
+        if b.height == 0 {
+            continue;
+        }
+        let want_prev = b.prevhash32.clone().unwrap_or_default();
+        if want_prev.is_empty() {
+            continue;
+        }
+        let prev_h = b.height.saturating_sub(1);
+
+        // Accept genesis as a valid common ancestor for chains that diverge from height 1.
+        if prev_h == 0 && want_prev.eq_ignore_ascii_case(&genesis_hash) {
+            if fp_height.map(|h| prev_h > h).unwrap_or(true) {
+                fp_height = Some(prev_h);
+                fp_index = Some(i);
+            }
+            continue;
+        }
+
+        if prev_h < window_start {
+            continue;
+        }
+
+        let Some(local_prev_hash) = local_hash_at_or_genesis(prev_h) else {
+            continue;
+        };
+
+        if local_prev_hash == want_prev && fp_height.map(|h| prev_h > h).unwrap_or(true) {
+            fp_height = Some(prev_h);
+            fp_index = Some(i);
+        }
+    }
+
+    fp_height.zip(fp_index)
+}
+
 fn log_throttle_state() -> &'static Mutex<HashMap<String, (Instant, u64)>> {
     LOG_THROTTLE_STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -2708,8 +2766,10 @@ fn handle_peer(
                         // Potential fork: does this connect to a known block at height-1?
                         if first.height > 0 && !prev.is_empty() {
                             let want_h = first.height.saturating_sub(1);
-                            if let Some(prevb) = store::block_at(&data_dir, want_h) {
-                                if prevb.hash32 == prev {
+                            if let Some(prev_hash) =
+                                canonical_hash_at_or_genesis(&data_dir, network, want_h)
+                            {
+                                if prev_hash.eq_ignore_ascii_case(&prev) {
                                     mode = "reorg_candidate";
                                     fork_point = Some(want_h);
                                 }
@@ -2771,13 +2831,8 @@ fn handle_peer(
                     (tip_h.saturating_add(1), tip_hash.clone())
                 } else {
                     let fp = fork_point.unwrap_or(0);
-                    let prev_hash = if fp == 0 {
-                        "0".repeat(64)
-                    } else {
-                        store::block_at(&data_dir, fp)
-                            .map(|b| b.hash32)
-                            .unwrap_or_else(|| tip_hash.clone())
-                    };
+                    let prev_hash = canonical_hash_at_or_genesis(&data_dir, network, fp)
+                        .unwrap_or_else(|| tip_hash.clone());
                     (fp.saturating_add(1), prev_hash)
                 };
 
@@ -3317,41 +3372,15 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
 
                             // Try forkpoint discovery within the received batch:
                             // Choose the *closest* forkpoint (highest height) within our undo window.
-                            let window_start = tip_h.saturating_sub(store::REORG_UNDO_WINDOW);
-                            let mut fp_height: Option<u64> = None;
-                            let mut fp_index: Option<usize> = None;
-                            for (i, b) in blocks.iter().enumerate() {
-                                if b.height == 0 {
-                                    continue;
-                                }
-                                let want_prev = b.prevhash32.clone().unwrap_or_default();
-                                if want_prev.is_empty() {
-                                    continue;
-                                }
-                                let prev_h = b.height.saturating_sub(1);
-
-                                // Enforce reorg depth window: never consider forkpoints older than window_start.
-                                if prev_h < window_start {
-                                    continue;
-                                }
-
-                                let local_prev_hash = if prev_h == 0 {
-                                    "0".repeat(64)
-                                } else {
-                                    match store::block_at(data_dir, prev_h) {
-                                        Some(pb) => pb.hash32,
-                                        None => continue,
-                                    }
-                                };
-
-                                if local_prev_hash == want_prev {
-                                    // Prefer the closest forkpoint to our tip.
-                                    if fp_height.map(|h| prev_h > h).unwrap_or(true) {
-                                        fp_height = Some(prev_h);
-                                        fp_index = Some(i);
-                                    }
-                                }
-                            }
+                            let (fp_height, fp_index) = match discover_batch_forkpoint(
+                                network,
+                                tip_h,
+                                &blocks,
+                                |height| canonical_hash_at_or_genesis(data_dir, network, height),
+                            ) {
+                                Some((height, index)) => (Some(height), Some(index)),
+                                None => (None, None),
+                            };
 
                             if let (Some(fp_h), Some(i0)) = (fp_height, fp_index) {
                                 let slice = &blocks[i0..];
@@ -3751,7 +3780,8 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 #[cfg(test)]
 mod tests {
     use super::{
-        ban_peer_manual, canonicalize_peer_token, deeper_overlap_from, health_priority_sync_from,
+        ban_peer_manual, canonical_hash_at_or_genesis, canonicalize_peer_token,
+        deeper_overlap_from, discover_batch_forkpoint, health_priority_sync_from,
         is_transient_dial_error, list_banned_json, normalize_bootstrap_candidates,
         official_tip_sync_from, parse_peers_text, peer_tip_sync_request_from, read_line_limited,
         reorg_overlap_from, should_accept_reorg_candidate,
@@ -3874,6 +3904,42 @@ mod tests {
             ),
             Some(reorg_overlap_from(142))
         );
+    }
+
+    #[test]
+    fn canonical_hash_at_or_genesis_uses_testnet_genesis_for_forkpoint_zero() {
+        let expected = netparams::genesis_hash(Network::Testnet).to_string();
+        assert_eq!(
+            canonical_hash_at_or_genesis("ignored", Network::Testnet, 0),
+            Some(expected.clone())
+        );
+
+        let divergent_height_one_prev = expected;
+        assert_eq!(
+            canonical_hash_at_or_genesis("ignored", Network::Testnet, 0).as_deref(),
+            Some(divergent_height_one_prev.as_str())
+        );
+    }
+
+    #[test]
+    fn discover_batch_forkpoint_finds_genesis_for_height_one_divergence() {
+        let genesis = netparams::genesis_hash(Network::Testnet).to_string();
+        let blocks = vec![ChainBlock {
+            height: 1,
+            hash32: "11".repeat(32),
+            bits: 8,
+            chainwork: 256,
+            timestamp: Some(1),
+            prevhash32: Some(genesis.clone()),
+            merkle32: None,
+            nonce: Some(0),
+            miner: Some("test".to_string()),
+            pow_digest32: Some("22".repeat(32)),
+            txs: Some(serde_json::Value::Array(vec![])),
+        }];
+
+        let fp = discover_batch_forkpoint(Network::Testnet, 20, &blocks, |_height| None);
+        assert_eq!(fp, Some((0, 0)));
     }
 
     #[test]
