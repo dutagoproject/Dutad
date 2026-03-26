@@ -399,6 +399,27 @@ fn adjust_bits_normal(bits: u64, actual: u64, target: u64, min_bits: u64, max_bi
     adjust_bits_capped(bits, actual, target, min_bits, max_bits, 1, 1)
 }
 
+fn apply_normalization_stage(
+    current_bits: u64,
+    computed_bits: u64,
+    stage_floor: Option<u64>,
+    min_bits: u64,
+    max_bits: u64,
+) -> u64 {
+    let computed_bits = computed_bits.clamp(min_bits, max_bits);
+    match stage_floor {
+        Some(stage_floor) => {
+            let stage_floor = stage_floor.clamp(min_bits, max_bits);
+            if computed_bits < current_bits {
+                computed_bits
+            } else {
+                computed_bits.max(stage_floor)
+            }
+        }
+        None => computed_bits,
+    }
+}
+
 fn expected_bits_for_next_height(
     blocks: &sled::Tree,
     net: Network,
@@ -414,7 +435,9 @@ fn expected_bits_for_next_height(
 
     let last = block_at_from_tree(blocks, next_height - 1)
         .ok_or_else(|| "prev_block_missing".to_string())?;
-    let mut bits = last.bits;
+    let current_bits = last.bits;
+    let mut bits = current_bits;
+    let mut normalization_stage_floor = None;
     if let (Some(recovery_h), Some(recovery_bits)) = (
         pow_mandatory_recovery_height(net),
         pow_mandatory_recovery_bits(net),
@@ -431,7 +454,10 @@ fn expected_bits_for_next_height(
             } else {
                 recovery_bits + 3
             };
-            return Ok(stage_bits.clamp(min_bits, max_bits));
+            if next_height == recovery_h {
+                return Ok(stage_bits.clamp(min_bits, max_bits));
+            }
+            normalization_stage_floor = Some(stage_bits);
         }
     }
     let sync_gate = pow_launch_difficulty_hardening_enabled(net, next_height, bits);
@@ -452,7 +478,13 @@ fn expected_bits_for_next_height(
         if t_last <= t_first {
             // bad timestamps => make harder a bit (safe default)
             bits = bits.saturating_add(1);
-            return Ok(bits.clamp(min_bits, max_bits));
+            return Ok(apply_normalization_stage(
+                current_bits,
+                bits,
+                normalization_stage_floor,
+                min_bits,
+                max_bits,
+            ));
         }
 
         let actual = t_last - t_first;
@@ -462,7 +494,13 @@ fn expected_bits_for_next_height(
         } else {
             adjust_bits_normal(bits, actual, target, min_bits, max_bits)
         };
-        return Ok(bits);
+        return Ok(apply_normalization_stage(
+            current_bits,
+            bits,
+            normalization_stage_floor,
+            min_bits,
+            max_bits,
+        ));
     }
 
     // Retarget only at window boundary.
@@ -511,7 +549,13 @@ fn expected_bits_for_next_height(
             }
         }
 
-        return Ok(bits.clamp(min_bits, max_bits));
+        return Ok(apply_normalization_stage(
+            current_bits,
+            bits,
+            normalization_stage_floor,
+            min_bits,
+            max_bits,
+        ));
     }
 
     // Use a window of `window` blocks ending at `next_height - 1`.
@@ -526,7 +570,13 @@ fn expected_bits_for_next_height(
     if t_last <= t_first {
         // bad timestamps => make harder a bit (safe default)
         bits = bits.saturating_add(1);
-        return Ok(bits.clamp(min_bits, max_bits));
+        return Ok(apply_normalization_stage(
+            current_bits,
+            bits,
+            normalization_stage_floor,
+            min_bits,
+            max_bits,
+        ));
     }
 
     let actual = t_last - t_first;
@@ -538,7 +588,13 @@ fn expected_bits_for_next_height(
         adjust_bits_normal(bits, actual, target, min_bits, max_bits)
     };
 
-    Ok(bits)
+    Ok(apply_normalization_stage(
+        current_bits,
+        bits,
+        normalization_stage_floor,
+        min_bits,
+        max_bits,
+    ))
 }
 
 fn median_u64(mut v: Vec<u64>) -> u64 {
@@ -2959,6 +3015,46 @@ mod tests_a5 {
         db.flush().unwrap();
 
         assert_eq!(expected_bits_next(&data_dir).unwrap(), 22);
+    }
+
+    #[test]
+    fn mandatory_recovery_stage_is_floor_not_exact_override() {
+        let data_dir = temp_datadir("mandatory-recovery-stage-floor-only");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        bootstrap(&data_dir).unwrap();
+
+        let recovery_h = duta_core::netparams::pow_mandatory_recovery_height(Network::Mainnet)
+            .expect("mainnet recovery height");
+        let db = open_db(&data_dir).unwrap();
+        let meta = tree_meta(&db).unwrap();
+        let blocks = tree_blocks(&db).unwrap();
+
+        let tip_h = recovery_h + 6;
+        let mut prev_hash = genesis_hash(Network::Mainnet).to_string();
+        let mut cw = 0u64;
+        for h in 1..=tip_h {
+            let bits = if h < recovery_h { 34 } else { 21 };
+            cw = cw.saturating_add(work_from_bits(bits));
+            let block = ChainBlock {
+                height: h,
+                hash32: format!("{:064x}", 1_000_000 + h),
+                bits,
+                chainwork: cw,
+                timestamp: Some(h.saturating_mul(pow_target_secs(Network::Mainnet))),
+                prevhash32: Some(prev_hash.clone()),
+                merkle32: Some(format!("{:064x}", 1_100_000 + h)),
+                nonce: Some(0),
+                miner: Some("miner-stage-floor".to_string()),
+                pow_digest32: Some(format!("{:064x}", 1_200_000 + h)),
+                txs: None,
+            };
+            put_block_db(&blocks, &block).unwrap();
+            prev_hash = block.hash32.clone();
+        }
+        set_tip_fields_db(&meta, tip_h, prev_hash, cw, 21).unwrap();
+        db.flush().unwrap();
+
+        assert_eq!(expected_bits_next(&data_dir).unwrap(), 21);
     }
 
     #[test]
