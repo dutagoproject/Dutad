@@ -422,6 +422,11 @@ fn expected_bits_for_next_height(
         if next_height == recovery_h {
             return Ok(bits.min(recovery_bits).clamp(min_bits, max_bits));
         }
+        if next_height > recovery_h
+            && next_height < recovery_h.saturating_add(duta_core::netparams::pow_mandatory_recovery_window(net))
+        {
+            return Ok(recovery_bits.clamp(min_bits, max_bits));
+        }
     }
     let sync_gate = pow_launch_difficulty_hardening_enabled(net, next_height, bits);
 
@@ -2852,6 +2857,45 @@ mod tests_a5 {
         db.flush().unwrap();
 
         assert_eq!(expected_bits_next(&data_dir).unwrap(), 21);
+    }
+
+    #[test]
+    fn mandatory_recovery_holds_bits_18_through_window() {
+        let data_dir = temp_datadir("mandatory-recovery-hold");
+        ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        bootstrap(&data_dir).unwrap();
+
+        let recovery_h = duta_core::netparams::pow_mandatory_recovery_height(Network::Mainnet)
+            .expect("mainnet recovery height");
+        let db = open_db(&data_dir).unwrap();
+        let meta = tree_meta(&db).unwrap();
+        let blocks = tree_blocks(&db).unwrap();
+
+        let mut prev_hash = genesis_hash(Network::Mainnet).to_string();
+        let mut cw = 0u64;
+        for h in 1..=recovery_h {
+            let bits = if h < recovery_h { 34 } else { 18 };
+            cw = cw.saturating_add(work_from_bits(bits));
+            let block = ChainBlock {
+                height: h,
+                hash32: format!("{:064x}", 400_000 + h),
+                bits,
+                chainwork: cw,
+                timestamp: Some(h.saturating_mul(pow_target_secs(Network::Mainnet))),
+                prevhash32: Some(prev_hash.clone()),
+                merkle32: Some(format!("{:064x}", 500_000 + h)),
+                nonce: Some(0),
+                miner: Some("miner-hold".to_string()),
+                pow_digest32: Some(format!("{:064x}", 600_000 + h)),
+                txs: None,
+            };
+            put_block_db(&blocks, &block).unwrap();
+            prev_hash = block.hash32.clone();
+        }
+        set_tip_fields_db(&meta, recovery_h, prev_hash, cw, 18).unwrap();
+        db.flush().unwrap();
+
+        assert_eq!(expected_bits_next(&data_dir).unwrap(), 18);
     }
 
     #[test]

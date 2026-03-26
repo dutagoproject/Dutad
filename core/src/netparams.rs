@@ -273,10 +273,7 @@ pub fn pow_launch_difficulty_hardening_enabled(
     current_bits: u64,
 ) -> bool {
     match net {
-        Network::Mainnet => {
-            pow_bootstrap_sync_enabled(net, next_height, current_bits)
-                || pow_mandatory_recovery_active(net, next_height)
-        }
+        Network::Mainnet => pow_bootstrap_sync_enabled(net, next_height, current_bits),
         Network::Testnet | Network::Stagenet => false,
     }
 }
