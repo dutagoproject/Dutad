@@ -966,6 +966,7 @@ const OUTBOUND_BAD_PEER_MIN_FAILS: u64 = 6;
 const OUTBOUND_BAD_PEER_DOMINANT_FAILS: u64 = 12;
 const OUTBOUND_BAD_PEER_MAX_EXPOSED: usize = 32;
 const ADMISSION_SCORE_REJECT_THRESHOLD: u32 = 50;
+const OUTBOUND_STALE_TIP_LAG_BLOCKS: u64 = 8;
 const MAX_OUTBOUND_DIALS_PER_TICK: usize = 32;
 const BLOCK_BROADCAST_FANOUT: usize = 16;
 const BLOCK_BROADCAST_MIN_INTERVAL_MS: u64 = 500;
@@ -1514,6 +1515,13 @@ fn peer_snapshot_json(peer: &PeerSnapshot) -> serde_json::Value {
 }
 
 fn outbound_peer_skip_reason(peer: &PeerSnapshot) -> Option<&'static str> {
+    let stale_best_seen = best_seen_height();
+    if stale_best_seen > 0
+        && peer.last_tip_height > 0
+        && stale_best_seen >= peer.last_tip_height.saturating_add(OUTBOUND_STALE_TIP_LAG_BLOCKS)
+    {
+        return Some("stale_tip");
+    }
     let cooldown_secs = if peer
         .last_error
         .as_deref()
@@ -3926,6 +3934,23 @@ mod tests {
         assert_eq!(
             super::outbound_peer_should_skip("38.190.227.49:19082"),
             Some("terminal_consensus".to_string())
+        );
+    }
+
+    #[test]
+    fn outbound_stale_tip_peer_is_immediately_skip_eligible() {
+        clear_test_peer_state();
+        super::BEST_SEEN_HEIGHT.store(5644, Ordering::Relaxed);
+        super::note_outbound_peer_result(
+            "158.140.176.172:19082",
+            true,
+            Some(5423),
+            Some(&"11".repeat(32)),
+            None,
+        );
+        assert_eq!(
+            super::outbound_peer_should_skip("158.140.176.172:19082"),
+            Some("stale_tip".to_string())
         );
     }
 
