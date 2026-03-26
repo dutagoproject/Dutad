@@ -2884,7 +2884,15 @@ fn handle_peer(
                                 );
                                 0
                             } else {
-                                if let Err(e) = store::rollback_to_height(&data_dir, fp) {
+                                if let Err(e) =
+                                    store::prevalidate_reorg_candidate(&data_dir, fp, slice)
+                                {
+                                    penalize_bad_blocks(&peer, peer_ip, &e, &net, &data_dir);
+                                    if is_banned(peer_ip) {
+                                        break;
+                                    }
+                                    0
+                                } else if let Err(e) = store::rollback_to_height(&data_dir, fp) {
                                     edlog!("p2p: reorg rollback_failed peer={} err={}", peer, e);
                                     0
                                 } else {
@@ -3010,6 +3018,17 @@ fn handle_peer(
                                         cand_cw,
                                     ))
                             {
+                                if let Err(e) = store::prevalidate_reorg_candidate(
+                                    &data_dir,
+                                    fp,
+                                    std::slice::from_ref(&block),
+                                ) {
+                                    penalize_bad_blocks(&peer, peer_ip, &e, &net, &data_dir);
+                                    if is_banned(peer_ip) {
+                                        break;
+                                    }
+                                    continue;
+                                }
                                 if let Err(e) = store::rollback_to_height(&data_dir, fp) {
                                     edlog!("p2p: reorg rollback_failed peer={} err={}", peer, e);
                                     continue;
@@ -3403,53 +3422,33 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                         incoming_cw,
                                     )
                                 {
-                                    match store::rollback_to_height(data_dir, fp_h) {
-                                        Ok(()) => {
-                                            let appended = match try_append_blocks(data_dir, slice)
-                                            {
-                                                Ok(n) => n,
-                                                Err(e) => {
-                                                    edlog!(
-                                                        "p2p: reorg append_failed peer={} rollback_to={} err={}",
-                                                        addr, fp_h, e
-                                                    );
-                                                    0
-                                                }
-                                            };
-                                            if appended > 0 {
-                                                appended_blocks = true;
-                                                let backbone_tie = incoming_cw == tip_cw;
-                                                note_reorg_accept(backbone_tie);
-                                                if let Some(last) = slice.last() {
-                                                    dlog!(
-                                                    "p2p: reorg peer={} rollback_to={} new_tip_height={} new_tip_hash={} new_tip_cw={}",
-                                                    addr, fp_h, last.height, last.hash32, incoming_cw
-                                                );
-                                                    if slice.len() >= MAX_BLOCKS_PER_MSG {
-                                                        let from =
-                                                            last.height.saturating_add(1) as usize;
-                                                        let _ = send_msg(
-                                                            &mut stream,
-                                                            &Msg::GetBlocksFrom {
-                                                                from,
-                                                                limit: MAX_BLOCKS_PER_MSG,
-                                                            },
+                                    match store::prevalidate_reorg_candidate(data_dir, fp_h, slice)
+                                    {
+                                        Ok(()) => match store::rollback_to_height(data_dir, fp_h) {
+                                            Ok(()) => {
+                                                let appended = match try_append_blocks(data_dir, slice)
+                                                {
+                                                    Ok(n) => n,
+                                                    Err(e) => {
+                                                        edlog!(
+                                                            "p2p: reorg append_failed peer={} rollback_to={} err={}",
+                                                            addr, fp_h, e
                                                         );
-                                                    } else if let Some((remote_h, remote_hash32)) =
-                                                        peer_tip_view.as_ref()
-                                                    {
-                                                        let (new_h, new_hash32, _new_bits, _new_cw) =
-                                                            tip_fields(data_dir);
-                                                        if let Some(from) =
-                                                            peer_tip_sync_request_from(
-                                                                network,
-                                                                addr,
-                                                                new_h,
-                                                                &new_hash32,
-                                                                *remote_h,
-                                                                remote_hash32,
-                                                            )
-                                                        {
+                                                        0
+                                                    }
+                                                };
+                                                if appended > 0 {
+                                                    appended_blocks = true;
+                                                    let backbone_tie = incoming_cw == tip_cw;
+                                                    note_reorg_accept(backbone_tie);
+                                                    if let Some(last) = slice.last() {
+                                                        dlog!(
+                                                        "p2p: reorg peer={} rollback_to={} new_tip_height={} new_tip_hash={} new_tip_cw={}",
+                                                        addr, fp_h, last.height, last.hash32, incoming_cw
+                                                    );
+                                                        if slice.len() >= MAX_BLOCKS_PER_MSG {
+                                                            let from =
+                                                                last.height.saturating_add(1) as usize;
                                                             let _ = send_msg(
                                                                 &mut stream,
                                                                 &Msg::GetBlocksFrom {
@@ -3457,29 +3456,65 @@ fn dial_once(addr: &str, data_dir: &str, net: &str) -> Result<(), String> {
                                                                     limit: MAX_BLOCKS_PER_MSG,
                                                                 },
                                                             );
-                                                            note_peer_resync(addr, false, true);
-                                                            requested_sync = true;
-                                                            max_read_steps = DIAL_SYNC_READ_STEPS;
-                                                            let _ = stream.set_read_timeout(
-                                                                Some(Duration::from_secs(
-                                                                    DIAL_SYNC_IO_TIMEOUT_SECS,
-                                                                )),
-                                                            );
-                                                            let _ = stream.set_write_timeout(
-                                                                Some(Duration::from_secs(
-                                                                    DIAL_SYNC_IO_TIMEOUT_SECS,
-                                                                )),
-                                                            );
+                                                        } else if let Some((remote_h, remote_hash32)) =
+                                                            peer_tip_view.as_ref()
+                                                        {
+                                                            let (new_h, new_hash32, _new_bits, _new_cw) =
+                                                                tip_fields(data_dir);
+                                                            if let Some(from) =
+                                                                peer_tip_sync_request_from(
+                                                                    network,
+                                                                    addr,
+                                                                    new_h,
+                                                                    &new_hash32,
+                                                                    *remote_h,
+                                                                    remote_hash32,
+                                                                )
+                                                            {
+                                                                let _ = send_msg(
+                                                                    &mut stream,
+                                                                    &Msg::GetBlocksFrom {
+                                                                        from,
+                                                                        limit: MAX_BLOCKS_PER_MSG,
+                                                                    },
+                                                                );
+                                                                note_peer_resync(addr, false, true);
+                                                                requested_sync = true;
+                                                                max_read_steps = DIAL_SYNC_READ_STEPS;
+                                                                let _ = stream.set_read_timeout(
+                                                                    Some(Duration::from_secs(
+                                                                        DIAL_SYNC_IO_TIMEOUT_SECS,
+                                                                    )),
+                                                                );
+                                                                let _ = stream.set_write_timeout(
+                                                                    Some(Duration::from_secs(
+                                                                        DIAL_SYNC_IO_TIMEOUT_SECS,
+                                                                    )),
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
-                                        }
+                                            Err(e) => {
+                                                edlog!(
+                                                "p2p: reorg rollback_failed peer={} rollback_to={} err={}",
+                                                addr, fp_h, e
+                                            );
+                                            }
+                                        },
                                         Err(e) => {
+                                            note_outbound_peer_result(
+                                                addr,
+                                                false,
+                                                None,
+                                                None,
+                                                Some(&e),
+                                            );
                                             edlog!(
-                                            "p2p: reorg rollback_failed peer={} rollback_to={} err={}",
-                                            addr, fp_h, e
-                                        );
+                                                "p2p: reorg prevalidate_failed peer={} rollback_to={} err={}",
+                                                addr, fp_h, e
+                                            );
                                         }
                                     }
                                 }

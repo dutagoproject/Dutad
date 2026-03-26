@@ -17,6 +17,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1416,6 +1417,71 @@ pub fn rollback_to_height(data_dir: &str, target_height: u64) -> Result<(), Stri
 
     db.flush().map_err(|e| format!("db_flush_failed: {}", e))?;
     Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst).map_err(|e| format!("dir_create_failed: {}", e))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("dir_read_failed: {}", e))? {
+        let entry = entry.map_err(|e| format!("dir_entry_failed: {}", e))?;
+        let ty = entry
+            .file_type()
+            .map_err(|e| format!("file_type_failed: {}", e))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ty.is_file() {
+            fs::copy(&from, &to).map_err(|e| format!("file_copy_failed: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
+fn temp_reorg_validation_dir() -> Result<PathBuf, String> {
+    let mut p = std::env::temp_dir();
+    let uniq = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    p.push(format!("duta-reorg-validate-{}-{}", std::process::id(), uniq));
+    fs::create_dir_all(&p).map_err(|e| format!("dir_create_failed: {}", e))?;
+    Ok(p)
+}
+
+pub fn prevalidate_reorg_candidate(
+    data_dir: &str,
+    rollback_to: u64,
+    blocks: &[ChainBlock],
+) -> Result<(), String> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+
+    let src = Path::new(data_dir);
+    let tmp = temp_reorg_validation_dir()?;
+    let db_src = src.join("db");
+    let db_dst = tmp.join("db");
+    let meta_src = src.join("datadir_meta.json");
+    let meta_dst = tmp.join("datadir_meta.json");
+
+    let result = (|| -> Result<(), String> {
+        copy_dir_recursive(&db_src, &db_dst)?;
+        if meta_src.exists() {
+            fs::copy(&meta_src, &meta_dst).map_err(|e| format!("file_copy_failed: {}", e))?;
+        }
+        let tmp_str = tmp.to_string_lossy().to_string();
+        rollback_to_height(&tmp_str, rollback_to)?;
+        for block in blocks {
+            note_accepted_block(&tmp_str, block)?;
+        }
+        Ok(())
+    })();
+
+    let _ = fs::remove_dir_all(&tmp);
+    result
 }
 
 fn tip_fields_from_tree(meta: &sled::Tree) -> Option<(u64, String, u64, u64)> {
