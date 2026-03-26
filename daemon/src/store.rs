@@ -2710,7 +2710,7 @@ mod tests_a5 {
     }
 
     #[test]
-    fn mandatory_recovery_forces_bits_22_at_recovery_height() {
+    fn mandatory_recovery_forces_bits_18_at_recovery_height() {
         let data_dir = temp_datadir("mandatory-recovery-r");
         ensure_datadir_meta(&data_dir, "mainnet").unwrap();
         bootstrap(&data_dir).unwrap();
@@ -2745,7 +2745,7 @@ mod tests_a5 {
         set_tip_fields_db(&meta, recovery_h - 1, prev_hash, cw, 34).unwrap();
         db.flush().unwrap();
 
-        assert_eq!(expected_bits_next(&data_dir).unwrap(), 22);
+        assert_eq!(expected_bits_next(&data_dir).unwrap(), 18);
     }
 
     #[test]
