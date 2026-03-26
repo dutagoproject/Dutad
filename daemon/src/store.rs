@@ -74,21 +74,36 @@ pub fn durable_write_bytes(path: &str, body: &[u8]) -> Result<(), String> {
         .unwrap_or_default()
         .as_nanos();
     let tmp = format!("{}.tmp.{}.{}.{}", path, std::process::id(), now_nanos, seq);
+    let cleanup_tmp = |tmp: &str| {
+        let _ = fs::remove_file(tmp);
+    };
     let mut f = fs::File::create(&tmp).map_err(|e| format!("tmp_create_failed: {}", e))?;
-    f.write_all(body)
-        .map_err(|e| format!("tmp_write_failed: {}", e))?;
-    f.sync_all()
-        .map_err(|e| format!("tmp_sync_failed: {}", e))?;
+    if let Err(e) = f.write_all(body) {
+        drop(f);
+        cleanup_tmp(&tmp);
+        return Err(format!("tmp_write_failed: {}", e));
+    }
+    if let Err(e) = f.sync_all() {
+        drop(f);
+        cleanup_tmp(&tmp);
+        return Err(format!("tmp_sync_failed: {}", e));
+    }
     drop(f);
 
     match fs::rename(&tmp, path) {
         Ok(()) => {}
         Err(rename_err) => {
             if path_ref.exists() {
-                fs::remove_file(path).map_err(|e| format!("replace_remove_failed: {}", e))?;
-                fs::rename(&tmp, path)
-                    .map_err(|e| format!("rename_failed: {} (initial={})", e, rename_err))?;
+                if let Err(e) = fs::remove_file(path) {
+                    cleanup_tmp(&tmp);
+                    return Err(format!("replace_remove_failed: {}", e));
+                }
+                if let Err(e) = fs::rename(&tmp, path) {
+                    cleanup_tmp(&tmp);
+                    return Err(format!("rename_failed: {} (initial={})", e, rename_err));
+                }
             } else {
+                cleanup_tmp(&tmp);
                 return Err(format!("rename_failed: {}", rename_err));
             }
         }
@@ -2728,6 +2743,31 @@ mod tests_a5 {
         }
         let final_body = std::fs::read_to_string(&path).expect("final body");
         assert!(final_body.contains("\"idx\""));
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn durable_write_bytes_cleans_tmp_file_on_rename_error() {
+        let data_dir = temp_datadir("durable-write-cleanup");
+        let path = format!("{}/peers.txt", data_dir);
+        std::fs::create_dir_all(&path).expect("create conflicting dir");
+
+        let err = durable_write_string(&path, "hello").unwrap_err();
+        assert!(err.contains("replace_remove_failed") || err.contains("rename_failed"));
+
+        let entries: Vec<String> = std::fs::read_dir(&data_dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .all(|name| !name.starts_with("peers.txt.tmp.")),
+            "unexpected tmp leak: {:?}",
+            entries
+        );
+
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 

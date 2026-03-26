@@ -1336,19 +1336,30 @@ fn note_peer(data_dir: &str, peer: &str) {
         if now.duration_since(*last) >= Duration::from_secs(PEERS_FLUSH_INTERVAL_SECS) {
             *last = now;
             drop(g);
-            flush_peers(data_dir);
+            if let Err(err) = flush_peers(data_dir) {
+                log_throttled_error("flush_peers_failed", 300, |suppressed| {
+                    if suppressed > 0 {
+                        format!(
+                            "p2p: flush_peers_failed err={} suppressed={} window_secs=300",
+                            err, suppressed
+                        )
+                    } else {
+                        format!("p2p: flush_peers_failed err={}", err)
+                    }
+                });
+            }
         }
     }
 }
 
-fn flush_peers(data_dir: &str) {
+fn flush_peers(data_dir: &str) -> Result<(), String> {
     let m = match KNOWN_PEERS.get() {
         Some(m) => m,
-        None => return,
+        None => return Ok(()),
     };
     let g = match m.lock() {
         Ok(g) => g,
-        Err(_) => return,
+        Err(_) => return Err("known_peers_lock_failed".to_string()),
     };
 
     // Sort by most-recent.
@@ -1374,7 +1385,8 @@ fn flush_peers(data_dir: &str) {
     }
 
     let path = peers_path(data_dir);
-    let _ = store::durable_write_string(&path, &out);
+    store::durable_write_string(&path, &out)
+        .map_err(|e| format!("durable_write_failed: {}", e))
 }
 
 /// Manually add a peer/seed to the persisted peers list (peers.txt).
@@ -1384,7 +1396,7 @@ pub fn add_peer_manual(data_dir: &str, peer: &str) -> Result<(), String> {
     let peer = canonicalize_peer_token(peer).ok_or_else(|| "invalid_peer".to_string())?;
     // Record and flush immediately so it persists across restarts.
     note_peer(data_dir, &peer);
-    flush_peers(data_dir);
+    flush_peers(data_dir).map_err(|e| format!("flush_peers_failed: {}", e))?;
 
     // Clear dial backoff for this peer so the outbound loop can try immediately.
     if let Some(m) = DIAL_BACKOFF.get() {
@@ -3960,6 +3972,7 @@ mod tests {
     use crate::ChainBlock;
     use duta_core::netparams::{self, Network};
     use std::io::{BufReader, Cursor};
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
 
@@ -3986,8 +3999,24 @@ mod tests {
         if let Ok(mut scores) = super::state().ip_scores.lock() {
             scores.clear();
         }
+        if let Some(peers) = super::KNOWN_PEERS.get() {
+            if let Ok(mut known) = peers.lock() {
+                known.clear();
+            }
+        }
     }
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn temp_peer_datadir(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-p2p-test-{}-{}", tag, uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        p.to_string_lossy().to_string()
+    }
 
     #[test]
     fn reorg_candidate_requires_strictly_higher_chainwork() {
@@ -4055,6 +4084,34 @@ mod tests {
             "ignored",
         );
         assert!(super::is_banned(ip));
+    }
+
+    #[test]
+    fn add_peer_manual_surfaces_flush_error() {
+        clear_test_peer_state();
+        let data_dir = temp_peer_datadir("flush-error");
+        let mut path = PathBuf::from(&data_dir);
+        path.push("peers.txt");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let err = super::add_peer_manual(&data_dir, "203.0.113.9")
+            .expect_err("flush should fail against directory target");
+        assert!(err.contains("flush_peers_failed"));
+
+        let tmp_files: Vec<String> = std::fs::read_dir(&data_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            tmp_files
+                .iter()
+                .all(|name| !name.starts_with("peers.txt.tmp.")),
+            "unexpected tmp leak: {:?}",
+            tmp_files
+        );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]
