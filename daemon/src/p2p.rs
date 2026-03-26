@@ -1204,7 +1204,12 @@ fn load_bootstrap_candidates(
     configured_seeds: &[String],
 ) -> BootstrapCandidates {
     let seeds_file = load_list_file(data_dir, SEEDS_FILE);
-    let persisted = load_list_file(data_dir, PEERS_FILE);
+    let persisted_raw = load_list_file(data_dir, PEERS_FILE);
+    let network = Network::parse_name(net).unwrap_or(Network::Mainnet);
+    let persisted: Vec<String> = persisted_raw
+        .into_iter()
+        .filter(|peer| backbone_allows_persisted_peer(network, default_port, configured_seeds, peer))
+        .collect();
     let mut source_parts: Vec<&str> = Vec::new();
 
     let mut base = if !configured_seeds.is_empty() {
@@ -1305,6 +1310,12 @@ fn note_peer(data_dir: &str, peer: &str) {
     let Some(peer) = canonicalize_peer_token(peer) else {
         return;
     };
+    if let Some(cfg) = cfg() {
+        let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
+        if !backbone_allows_persisted_peer(net, &cfg.port, &cfg.seeds, &peer) {
+            return;
+        }
+    }
     let m = KNOWN_PEERS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut g = lock_or_recover(m, "known_peers");
     let now = Instant::now();
@@ -1341,7 +1352,18 @@ fn flush_peers(data_dir: &str) {
     };
 
     // Sort by most-recent.
-    let mut v: Vec<(String, Instant)> = g.iter().map(|(k, t)| (k.clone(), *t)).collect();
+    let mut v: Vec<(String, Instant)> = g
+        .iter()
+        .filter(|(k, _)| {
+            cfg()
+                .map(|cfg| {
+                    let net = Network::parse_name(&cfg.net).unwrap_or(Network::Mainnet);
+                    backbone_allows_persisted_peer(net, &cfg.port, &cfg.seeds, k)
+                })
+                .unwrap_or(true)
+        })
+        .map(|(k, t)| (k.clone(), *t))
+        .collect();
     v.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
 
     let mut out = String::new();
@@ -1412,6 +1434,21 @@ fn note_inbound_peer_disconnected(addr: &str) {
     if let Ok(mut peers) = state().inbound_live.lock() {
         peers.remove(addr);
     }
+}
+
+fn backbone_outbound_only_mode_for(net: Network, port: &str, configured_seeds: &[String]) -> bool {
+    net == Network::Mainnet
+        && configured_seeds.len() >= 2
+        && configured_seeds.iter().all(|peer| {
+            is_launch_backbone_peer_for_net(net, &candidate_addr(peer, port))
+        })
+}
+
+fn backbone_allows_persisted_peer(net: Network, port: &str, configured_seeds: &[String], peer: &str) -> bool {
+    if !backbone_outbound_only_mode_for(net, port, configured_seeds) {
+        return true;
+    }
+    is_launch_backbone_peer_for_net(net, &candidate_addr(peer, port))
 }
 
 fn is_terminal_public_peer_error(err: &str) -> bool {
@@ -1760,6 +1797,12 @@ fn select_outbound_targets(
     local_ip: &str,
     limit: usize,
 ) -> Vec<String> {
+    let official_net = cfg()
+        .and_then(|cfg| Network::parse_name(&cfg.net))
+        .unwrap_or(Network::Mainnet);
+    let backbone_only = cfg()
+        .map(|cfg| backbone_outbound_only_mode_for(official_net, &cfg.port, &cfg.seeds))
+        .unwrap_or(false);
     let mut scored: Vec<(i64, String)> = peers
         .iter()
         .filter_map(|peer| {
@@ -1767,6 +1810,9 @@ fn select_outbound_targets(
                 return None;
             }
             let addr = candidate_addr(peer, port);
+            if backbone_only && !is_launch_backbone_peer_for_net(official_net, &addr) {
+                return None;
+            }
             if outbound_peer_should_skip(&addr).is_some() {
                 return None;
             }
@@ -1774,9 +1820,6 @@ fn select_outbound_targets(
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let official_net = cfg()
-        .and_then(|cfg| Network::parse_name(&cfg.net))
-        .unwrap_or(Network::Mainnet);
     let mut official = Vec::new();
     let mut other = Vec::new();
     for (_, addr) in scored.into_iter() {
@@ -3903,7 +3946,8 @@ pub fn start_p2p(bind_addr: String, data_dir: String, net: String, configured_se
 #[cfg(test)]
 mod tests {
     use super::{
-        ban_peer_manual, canonical_hash_at_or_genesis, canonicalize_peer_token,
+        backbone_allows_persisted_peer, backbone_outbound_only_mode_for, ban_peer_manual,
+        canonical_hash_at_or_genesis, canonicalize_peer_token,
         deeper_overlap_from, discover_batch_forkpoint, health_priority_sync_from,
         is_transient_dial_error, list_banned_json, normalize_bootstrap_candidates,
         official_tip_sync_from, parse_peers_text, peer_tip_sync_request_from, read_line_limited,
@@ -4319,6 +4363,48 @@ mod tests {
                 "127.0.0.1:18082".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn backbone_only_mode_detects_official_mainnet_seed_set() {
+        assert!(backbone_outbound_only_mode_for(
+            Network::Mainnet,
+            "19082",
+            &[
+                "seed1.dutago.xyz:19082".to_string(),
+                "seed2.dutago.xyz:19082".to_string(),
+            ],
+        ));
+        assert!(!backbone_outbound_only_mode_for(
+            Network::Mainnet,
+            "19082",
+            &[
+                "seed1.dutago.xyz:19082".to_string(),
+                "198.51.100.10:19082".to_string(),
+            ],
+        ));
+    }
+
+    #[test]
+    fn backbone_only_mode_rejects_persisting_random_public_peer() {
+        assert!(!backbone_allows_persisted_peer(
+            Network::Mainnet,
+            "19082",
+            &[
+                "seed1.dutago.xyz:19082".to_string(),
+                "seed2.dutago.xyz:19082".to_string(),
+            ],
+            "38.190.227.49"
+        ));
+        assert!(backbone_allows_persisted_peer(
+            Network::Mainnet,
+            "19082",
+            &[
+                "seed1.dutago.xyz:19082".to_string(),
+                "seed2.dutago.xyz:19082".to_string(),
+            ],
+            "seed1.dutago.xyz:19082"
+        ));
     }
 
     #[test]
