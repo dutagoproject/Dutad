@@ -472,6 +472,26 @@ fn load_mempool(data_dir: &str) -> serde_json::Value {
     }
 }
 
+pub fn load_orphan_pool(data_dir: &str) -> serde_json::Value {
+    let mut mp = load_mempool(data_dir);
+    ensure_orphan_shape(&mut mp);
+    mp.get("orphans").cloned().unwrap_or_else(|| json!({
+        "txids": [],
+        "txs": {},
+        "meta": {}
+    }))
+}
+
+pub fn find_orphan_tx(
+    data_dir: &str,
+    txid: &str,
+) -> Option<(serde_json::Value, Option<serde_json::Value>)> {
+    let orphans = load_orphan_pool(data_dir);
+    let tx = orphans.get("txs").and_then(|x| x.get(txid)).cloned()?;
+    let meta = orphans.get("meta").and_then(|x| x.get(txid)).cloned();
+    Some((tx, meta))
+}
+
 fn sanitize_mempool_value(v: &serde_json::Value) -> Option<serde_json::Value> {
     let mut mp = v.clone();
     let txs_obj = mp.get("txs").and_then(|x| x.as_object())?.clone();
@@ -1027,7 +1047,8 @@ mod tests {
     use super::{
         enforce_mempool_caps, ingest_tx_p2p, load_mempool, parse_submit_tx_request,
         prune_confirmed_txids_from_mempool_file, rebuild_mempool_txids,
-        reconcile_confirmed_mempool_file, sanitize_mempool_value, save_mempool, txid_from_value,
+        reconcile_confirmed_mempool_file, sanitize_mempool_value, save_mempool,
+        txid_from_value,
         txid_is_valid,
     };
     use duta_core::address;

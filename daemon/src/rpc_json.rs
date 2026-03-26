@@ -603,6 +603,30 @@ fn find_tx(
     None
 }
 
+fn orphan_pool_info_json(data_dir: &str) -> serde_json::Value {
+    let orphans = crate::submit_tx::load_orphan_pool(data_dir);
+    let txids = orphans
+        .get("txids")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let bytes = orphans
+        .get("meta")
+        .and_then(|v| v.as_object())
+        .map(|meta| {
+            meta.values()
+                .filter_map(|entry| entry.get("bytes").and_then(|x| x.as_u64()))
+                .sum::<u64>()
+        })
+        .unwrap_or(0);
+    json!({
+        "loaded": true,
+        "size": txids.len(),
+        "bytes": bytes,
+        "usage": bytes
+    })
+}
+
 fn scan_utxo_set_info(data_dir: &str) -> serde_json::Value {
     let (tip_h, best_hash, _cw, _bits) =
         crate::store::tip_fields(data_dir).unwrap_or((0, "0".repeat(64), 0, 0));
@@ -709,6 +733,9 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
                 "getblockheader(hash_or_height, verbose=true)",
                 "getrawmempool(verbose=false)",
                 "getmempoolinfo",
+                "getorphanpool(verbose=false)",
+                "getorphanpoolinfo",
+                "getorphantransaction(txid, verbose=false)",
                 "getdifficulty",
                 "getnetworkhashps(lookup=120)",
                 "getblocktemplate(template_request={})",
@@ -900,6 +927,49 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
             ))
         }
 
+        "getorphanpool" => {
+            let verbose = params.first().and_then(as_bool).unwrap_or(false);
+            let orphans = crate::submit_tx::load_orphan_pool(data_dir);
+            if verbose {
+                let txs = orphans
+                    .get("txs")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                let meta = orphans
+                    .get("meta")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut out = serde_json::Map::new();
+                for (txid, txv) in txs {
+                    let bytes = meta
+                        .get(&txid)
+                        .and_then(|m| m.get("bytes"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or_else(|| serde_json::to_vec(&txv).map(|v| v.len() as u64).unwrap_or(0));
+                    let time = meta
+                        .get(&txid)
+                        .and_then(|m| m.get("ts"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                    out.insert(txid, json!({
+                        "size": bytes,
+                        "bytes": bytes,
+                        "time": time
+                    }));
+                }
+                Ok(ok(id, serde_json::Value::Object(out)))
+            } else {
+                Ok(ok(
+                    id,
+                    orphans.get("txids").cloned().unwrap_or_else(|| json!([])),
+                ))
+            }
+        }
+
+        "getorphanpoolinfo" => Ok(ok(id, orphan_pool_info_json(data_dir))),
+
         "gettxout" => {
             let txid = match params.first().and_then(as_str) {
                 Some(s) if !s.is_empty() => s,
@@ -1028,6 +1098,49 @@ pub fn handle_rpc(body: &[u8], data_dir: &str, net: &str) -> Result<String, Stri
                 }
                 if let Some(c) = confirmations {
                     obj.insert("confirmations".to_string(), json!(c));
+                }
+            }
+            Ok(ok(id, out))
+        }
+
+        "getorphantransaction" => {
+            let txid = match params.first().and_then(as_str) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => return Ok(err(id, -32602, "missing_txid")),
+            };
+            let verbose = params.get(1).and_then(as_bool).unwrap_or(false);
+            let (tx, meta) = match crate::submit_tx::find_orphan_tx(data_dir, &txid) {
+                Some(v) => v,
+                None => return Ok(err(id, -5, "tx_not_found")),
+            };
+            if !verbose {
+                return match tx_hex_from_json(&tx) {
+                    Ok(hex) => Ok(ok(id, json!(hex))),
+                    Err(e) => Ok(err(id, -22, &e)),
+                };
+            }
+            let hex_tx = tx_hex_from_json(&tx).unwrap_or_default();
+            let mut out = tx;
+            let size = meta
+                .as_ref()
+                .and_then(|m| m.get("bytes"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or_else(|| serde_json::to_vec(&out).map(|b| b.len() as u64).unwrap_or(0));
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("txid".to_string(), json!(txid));
+                obj.insert("hash".to_string(), json!(txid));
+                obj.insert("hex".to_string(), json!(hex_tx));
+                obj.insert("size".to_string(), json!(size));
+                obj.insert("vsize".to_string(), json!(size));
+                obj.insert("weight".to_string(), json!(size));
+                obj.insert("in_orphan_pool".to_string(), json!(true));
+                if let Some(meta) = meta {
+                    if let Some(ts) = meta.get("ts").and_then(|x| x.as_u64()) {
+                        obj.insert("orphan_time".to_string(), json!(ts));
+                    }
+                    if let Some(bytes) = meta.get("bytes").and_then(|x| x.as_u64()) {
+                        obj.insert("orphan_bytes".to_string(), json!(bytes));
+                    }
                 }
             }
             Ok(ok(id, out))
@@ -1399,6 +1512,55 @@ mod tests {
             result.get("hash").and_then(|x| x.as_str()).unwrap_or(""),
             duta_core::netparams::genesis_hash(duta_core::netparams::Network::Mainnet)
         );
+    }
+
+    #[test]
+    fn rpc_orphan_endpoints_expose_orphan_tx_without_touching_mempool_rpc() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-rpc-orphan-test-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        crate::store::ensure_datadir_meta(&data_dir, "mainnet").unwrap();
+        crate::store::bootstrap(&data_dir).unwrap();
+
+        let tx = json!({
+            "vin":[{"txid":"01","vout":0}],
+            "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}],
+            "fee": 1000,
+            "size": 123
+        });
+        let mut tx_for_id = tx.clone();
+        tx_for_id.as_object_mut().unwrap().remove("size");
+        let txid = crate::store::txid_from_value(&tx_for_id).unwrap();
+        let mp = json!({
+            "txids": [],
+            "txs": {},
+            "orphans": {
+                "txids": [txid.clone()],
+                "txs": { txid.clone(): tx.clone() },
+                "meta": { txid.clone(): {"ts": 123u64, "bytes": 321u64} }
+            }
+        });
+        std::fs::write(
+            format!("{}/mempool.json", data_dir),
+            serde_json::to_string(&mp).unwrap(),
+        )
+        .unwrap();
+
+        let body = json!({"id":1,"method":"getorphanpoolinfo","params":[]}).to_string();
+        let out = handle_rpc(body.as_bytes(), &data_dir, "mainnet").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["result"]["size"], json!(1));
+
+        let body = json!({"id":1,"method":"getorphantransaction","params":[txid, true]}).to_string();
+        let out = handle_rpc(body.as_bytes(), &data_dir, "mainnet").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["result"]["in_orphan_pool"], json!(true));
+        assert_eq!(v["result"]["orphan_bytes"], json!(321));
     }
 
     #[test]
