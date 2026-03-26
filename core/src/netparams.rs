@@ -171,7 +171,7 @@ pub fn pow_v4_activation_height(net: Network) -> u64 {
 
 pub fn pow_mandatory_recovery_height(net: Network) -> Option<u64> {
     match net {
-        Network::Mainnet => Some(5_650),
+        Network::Mainnet => Some(5_750),
         Network::Testnet | Network::Stagenet => None,
     }
 }
@@ -369,7 +369,7 @@ mod pow_version_tests {
     fn mandatory_recovery_window_is_mainnet_only_and_bounded() {
         let start = pow_mandatory_recovery_height(Network::Mainnet).unwrap();
         let bits = pow_mandatory_recovery_bits(Network::Mainnet).unwrap();
-        assert_eq!(start, 5_650);
+        assert_eq!(start, 5_750);
         assert_eq!(bits, 19);
         assert_eq!(pow_mandatory_recovery_window(Network::Mainnet), 20);
         assert!(pow_mandatory_recovery_active(Network::Mainnet, start));
