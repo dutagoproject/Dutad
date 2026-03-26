@@ -961,9 +961,11 @@ const PEERS_FLUSH_INTERVAL_SECS: u64 = 15;
 const MAX_BLOCKS_PER_MSG: usize = 128;
 const MAX_PEER_TOKEN_LEN: usize = 255;
 const OUTBOUND_BAD_PEER_COOLDOWN_SECS: u64 = 30 * 60;
+const OUTBOUND_TERMINAL_BAD_PEER_COOLDOWN_SECS: u64 = 6 * 60 * 60;
 const OUTBOUND_BAD_PEER_MIN_FAILS: u64 = 6;
 const OUTBOUND_BAD_PEER_DOMINANT_FAILS: u64 = 12;
 const OUTBOUND_BAD_PEER_MAX_EXPOSED: usize = 32;
+const ADMISSION_SCORE_REJECT_THRESHOLD: u32 = 50;
 const MAX_OUTBOUND_DIALS_PER_TICK: usize = 32;
 const BLOCK_BROADCAST_FANOUT: usize = 16;
 const BLOCK_BROADCAST_MIN_INTERVAL_MS: u64 = 500;
@@ -1411,6 +1413,12 @@ fn note_inbound_peer_disconnected(addr: &str) {
     }
 }
 
+fn is_terminal_public_peer_error(err: &str) -> bool {
+    err.contains("legacy_pow_after_activation")
+        || err.contains("wrong_network")
+        || err.contains("wrong_genesis")
+}
+
 fn note_outbound_peer_result(
     addr: &str,
     ok: bool,
@@ -1506,8 +1514,26 @@ fn peer_snapshot_json(peer: &PeerSnapshot) -> serde_json::Value {
 }
 
 fn outbound_peer_skip_reason(peer: &PeerSnapshot) -> Option<&'static str> {
-    if peer.last_seen_at.elapsed() > Duration::from_secs(OUTBOUND_BAD_PEER_COOLDOWN_SECS) {
+    let cooldown_secs = if peer
+        .last_error
+        .as_deref()
+        .map(is_terminal_public_peer_error)
+        .unwrap_or(false)
+    {
+        OUTBOUND_TERMINAL_BAD_PEER_COOLDOWN_SECS
+    } else {
+        OUTBOUND_BAD_PEER_COOLDOWN_SECS
+    };
+    if peer.last_seen_at.elapsed() > Duration::from_secs(cooldown_secs) {
         return None;
+    }
+    if peer
+        .last_error
+        .as_deref()
+        .map(is_terminal_public_peer_error)
+        .unwrap_or(false)
+    {
+        return Some("terminal_consensus");
     }
     if peer.success_count == 0 && peer.failure_count >= OUTBOUND_BAD_PEER_MIN_FAILS {
         return Some("recent_failures");
@@ -1981,9 +2007,22 @@ fn add_ip_score(ip: IpAddr, delta: u32, reason: &str) -> u32 {
     score
 }
 
+fn recent_ip_score(ip: IpAddr) -> u32 {
+    let st = state();
+    let Ok(mut m) = st.ip_scores.lock() else {
+        return 0;
+    };
+    m.retain(|_, (_, ts)| ts.elapsed() < Duration::from_secs(IP_SCORE_DECAY_SECS));
+    m.get(&ip).map(|(score, _)| *score).unwrap_or(0)
+}
+
 fn try_accept_peer(ip: IpAddr) -> Option<PeerGuard> {
     if is_banned(ip) {
         wlog!("p2p: inbound_reject ip={} reason=banned", ip);
+        return None;
+    }
+    if !ip_is_loopback_or_private(ip) && recent_ip_score(ip) >= ADMISSION_SCORE_REJECT_THRESHOLD {
+        wlog!("p2p: inbound_reject ip={} reason=recent_misbehavior", ip);
         return None;
     }
     let st = state();
@@ -2409,6 +2448,17 @@ fn penalize_bad_blocks(peer: &str, peer_ip: IpAddr, err: &str, net: &str, data_d
     {
         dlog!(
             "p2p: reject blocks peer={} ip={} err={} action=ignore_penalty_launch_recovery",
+            peer,
+            peer_ip,
+            err
+        );
+        return;
+    }
+
+    if is_terminal_public_peer_error(err) {
+        ban_ip(peer_ip, "terminal_consensus_reject");
+        edlog!(
+            "p2p: reject blocks peer={} ip={} err={} action=ban_terminal_consensus",
             peer,
             peer_ip,
             err
@@ -3847,6 +3897,12 @@ mod tests {
         if let Ok(mut peers) = super::state().inbound_live.lock() {
             peers.clear();
         }
+        if let Ok(mut bans) = super::state().bans.lock() {
+            bans.clear();
+        }
+        if let Ok(mut scores) = super::state().ip_scores.lock() {
+            scores.clear();
+        }
     }
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -3855,6 +3911,45 @@ mod tests {
         assert!(!should_accept_reorg_candidate(100, 100));
         assert!(!should_accept_reorg_candidate(100, 99));
         assert!(should_accept_reorg_candidate(100, 101));
+    }
+
+    #[test]
+    fn outbound_terminal_consensus_error_is_immediately_skip_eligible() {
+        clear_test_peer_state();
+        super::note_outbound_peer_result(
+            "38.190.227.49:19082",
+            false,
+            None,
+            None,
+            Some("legacy_pow_after_activation"),
+        );
+        assert_eq!(
+            super::outbound_peer_should_skip("38.190.227.49:19082"),
+            Some("terminal_consensus".to_string())
+        );
+    }
+
+    #[test]
+    fn public_inbound_rejects_recent_misbehavior_before_session_admission() {
+        clear_test_peer_state();
+        let ip = IpAddr::V4(Ipv4Addr::new(38, 190, 227, 49));
+        let score = super::add_ip_score(ip, 50, "invalid_block");
+        assert_eq!(score, 50);
+        assert!(super::try_accept_peer(ip).is_none());
+    }
+
+    #[test]
+    fn terminal_consensus_reject_bans_public_peer_immediately() {
+        clear_test_peer_state();
+        let ip = IpAddr::V4(Ipv4Addr::new(38, 190, 227, 49));
+        super::penalize_bad_blocks(
+            "38.190.227.49:19082",
+            ip,
+            "legacy_pow_after_activation",
+            "mainnet",
+            "ignored",
+        );
+        assert!(super::is_banned(ip));
     }
 
     #[test]
