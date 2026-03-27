@@ -161,24 +161,24 @@ fn template_tx_for_block(txv: &serde_json::Value) -> serde_json::Value {
     tx
 }
 
-fn write_mempool_value(data_dir: &str, v: &serde_json::Value) -> Result<(), String> {
-    let path = format!("{}/mempool.json", data_dir.trim_end_matches('/'));
-    fs::write(
-        &path,
-        serde_json::to_vec(v).map_err(|e| format!("json_encode_failed: {}", e))?,
-    )
-    .map_err(|e| format!("mempool_write_failed: {}", e))
+enum TemplateFilterDecision {
+    Keep,
+    Reject,
+    Pending,
 }
 
-fn filter_template_mempool(
-    data_dir: &str,
+fn filter_template_mempool_with_lookup<F>(
     next_height: u64,
     mp: &serde_json::Value,
-) -> (serde_json::Value, bool) {
+    mut utxo_lookup: F,
+) -> serde_json::Value
+where
+    F: FnMut(&str, u64) -> Option<(u64, u64, bool, String)>,
+{
     let Some(txs_obj) = mp.get("txs").and_then(|v| v.as_object()) else {
-        return (mp.clone(), false);
+        return mp.clone();
     };
-    let ordered_ids: Vec<String> = mp
+    let mut ordered_ids: Vec<String> = mp
         .get("txids")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -188,85 +188,122 @@ fn filter_template_mempool(
         })
         .unwrap_or_default();
 
+    for txid in txs_obj.keys() {
+        if !ordered_ids.iter().any(|existing| existing == txid) {
+            ordered_ids.push(txid.clone());
+        }
+    }
+
     let mut kept_ids: Vec<String> = Vec::new();
     let mut kept_txs = serde_json::Map::new();
     let mut produced_outpoints: HashSet<String> = HashSet::new();
     let mut consumed_outpoints: HashSet<String> = HashSet::new();
+    let mut pending_ids = ordered_ids.clone();
+    let mut rejected_ids: HashSet<String> = HashSet::new();
 
-    for txid in ordered_ids {
-        let Some(txv) = txs_obj.get(&txid) else {
-            continue;
-        };
-        let vin = txv
-            .get("vin")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let vout = txv
-            .get("vout")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+    loop {
+        let mut next_pending = Vec::new();
+        let mut progressed = false;
 
-        let mut valid = true;
-        for input in &vin {
-            let Some(prev_txid) = input.get("txid").and_then(|v| v.as_str()) else {
-                valid = false;
-                break;
-            };
-            let Some(prev_vout) = input.get("vout").and_then(|v| v.as_u64()) else {
-                valid = false;
-                break;
-            };
-            let outpoint = format!("{}:{}", prev_txid, prev_vout);
-            if consumed_outpoints.contains(&outpoint) {
-                valid = false;
-                break;
-            }
-            if produced_outpoints.contains(&outpoint) {
-                consumed_outpoints.insert(outpoint);
+        for txid in pending_ids {
+            let Some(txv) = txs_obj.get(&txid) else {
                 continue;
-            }
-            match store::utxo_get(data_dir, prev_txid, prev_vout) {
-                Some((_value, created_height, is_coinbase, _pkh)) => {
-                    if is_coinbase
-                        && next_height < created_height.saturating_add(store::COINBASE_MATURITY)
-                    {
-                        valid = false;
-                        break;
-                    }
-                    consumed_outpoints.insert(outpoint);
-                }
-                None => {
-                    valid = false;
+            };
+            let vin = txv
+                .get("vin")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let vout = txv
+                .get("vout")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let mut decision = TemplateFilterDecision::Keep;
+            for input in &vin {
+                let Some(prev_txid) = input.get("txid").and_then(|v| v.as_str()) else {
+                    decision = TemplateFilterDecision::Reject;
+                    break;
+                };
+                let Some(prev_vout) = input.get("vout").and_then(|v| v.as_u64()) else {
+                    decision = TemplateFilterDecision::Reject;
+                    break;
+                };
+                let outpoint = format!("{}:{}", prev_txid, prev_vout);
+                if consumed_outpoints.contains(&outpoint) {
+                    decision = TemplateFilterDecision::Reject;
                     break;
                 }
+                if produced_outpoints.contains(&outpoint) {
+                    continue;
+                }
+                if rejected_ids.contains(prev_txid) {
+                    decision = TemplateFilterDecision::Reject;
+                    break;
+                }
+                if txs_obj.contains_key(prev_txid) {
+                    decision = TemplateFilterDecision::Pending;
+                    break;
+                }
+                match utxo_lookup(prev_txid, prev_vout) {
+                    Some((_value, created_height, is_coinbase, _pkh)) => {
+                        if is_coinbase
+                            && next_height
+                                < created_height.saturating_add(store::COINBASE_MATURITY)
+                        {
+                            decision = TemplateFilterDecision::Reject;
+                            break;
+                        }
+                    }
+                    None => {
+                        decision = TemplateFilterDecision::Reject;
+                        break;
+                    }
+                }
+            }
+
+            match decision {
+                TemplateFilterDecision::Keep => {
+                    for input in &vin {
+                        let prev_txid = input.get("txid").and_then(|v| v.as_str()).unwrap_or_default();
+                        let prev_vout = input.get("vout").and_then(|v| v.as_u64()).unwrap_or(0);
+                        consumed_outpoints.insert(format!("{}:{}", prev_txid, prev_vout));
+                    }
+                    for (idx, _output) in vout.iter().enumerate() {
+                        produced_outpoints.insert(format!("{}:{}", txid, idx));
+                    }
+                    kept_ids.push(txid.clone());
+                    kept_txs.insert(txid, txv.clone());
+                    progressed = true;
+                }
+                TemplateFilterDecision::Pending => next_pending.push(txid),
+                TemplateFilterDecision::Reject => {
+                    rejected_ids.insert(txid);
+                }
             }
         }
 
-        if !valid {
-            continue;
+        if next_pending.is_empty() || !progressed {
+            break;
         }
-
-        for (idx, _output) in vout.iter().enumerate() {
-            produced_outpoints.insert(format!("{}:{}", txid, idx));
-        }
-        kept_ids.push(txid.clone());
-        kept_txs.insert(txid, txv.clone());
+        pending_ids = next_pending;
     }
 
-    let removed = kept_txs.len() != txs_obj.len();
-    if !removed {
-        return (mp.clone(), false);
-    }
+    json!({
+        "txids": kept_ids,
+        "txs": kept_txs
+    })
+}
 
-    (
-        json!({
-            "txids": kept_ids,
-            "txs": kept_txs
-        }),
-        true,
-    )
+fn filter_template_mempool(
+    data_dir: &str,
+    next_height: u64,
+    mp: &serde_json::Value,
+) -> serde_json::Value {
+    filter_template_mempool_with_lookup(next_height, mp, |prev_txid, prev_vout| {
+        store::utxo_get(data_dir, prev_txid, prev_vout)
+    })
 }
 
 fn short_id(id: &str) -> &str {
@@ -395,11 +432,7 @@ pub(crate) fn build_work_template(
         ));
     }
     let height = next_height;
-    let mp = read_mempool_value(data_dir);
-    let (mp, filtered_invalid_txs) = filter_template_mempool(data_dir, next_height, &mp);
-    if filtered_invalid_txs {
-        let _ = write_mempool_value(data_dir, &mp);
-    }
+    let mp = filter_template_mempool(data_dir, next_height, &read_mempool_value(data_dir));
     let mut txids = mp
         .get("txids")
         .and_then(|x| x.as_array())
@@ -749,8 +782,9 @@ pub(crate) fn insert_test_work(work_id: &str, item: WorkItem) {
 #[cfg(test)]
 mod tests {
     use super::{
-        block_subsidy, mining_address_is_valid, mining_address_is_valid_for_network,
-        net_from_datadir, sanitize_mempool_value, stratum_work_scope, template_tx_for_block,
+        block_subsidy, filter_template_mempool_with_lookup, mining_address_is_valid,
+        mining_address_is_valid_for_network, net_from_datadir, sanitize_mempool_value,
+        stratum_work_scope, template_tx_for_block,
     };
     use crate::store;
     use duta_core::amount::DUT_PER_DUTA;
@@ -909,5 +943,81 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("duta-pow-v4")
         );
+    }
+
+    #[test]
+    fn filter_template_mempool_promotes_parent_before_child_even_if_order_is_reversed() {
+        let mp = json!({
+            "txids": ["child", "parent"],
+            "txs": {
+                "child": {
+                    "vin": [{"txid":"parent","vout":0}],
+                    "vout": [{"address":"test1dest","value":900}],
+                    "fee": 100
+                },
+                "parent": {
+                    "vin": [{"txid":"chain","vout":0}],
+                    "vout": [{"address":"test1dest","value":1000}],
+                    "fee": 100
+                }
+            }
+        });
+
+        let filtered = filter_template_mempool_with_lookup(10, &mp, |txid, vout| {
+            if txid == "chain" && vout == 0 {
+                Some((2_000, 1, false, String::new()))
+            } else {
+                None
+            }
+        });
+
+        let txids: Vec<String> = filtered
+            .get("txids")
+            .and_then(|v| v.as_array())
+            .expect("txids")
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        assert_eq!(txids, vec!["parent".to_string(), "child".to_string()]);
+    }
+
+    #[test]
+    fn build_work_template_does_not_prune_mempool_file_on_invalid_template_tx() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-work-mempool-preserve-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        store::bootstrap(&data_dir).unwrap();
+
+        let invalid_tx = json!({
+            "vin":[{"txid":"missing-parent","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":1000}],
+            "fee": 10
+        });
+        let txid = crate::store::txid_from_value(&invalid_tx).unwrap();
+        let mempool = json!({
+            "txids":[txid.clone()],
+            "txs": { txid.clone(): invalid_tx }
+        });
+        let mempool_path = format!("{}/mempool.json", data_dir);
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool).unwrap()).unwrap();
+
+        let tpl = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+
+        assert_eq!(tpl.get("tx_count").and_then(|v| v.as_u64()), Some(1));
+        let stored_after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mempool_path).unwrap()).unwrap();
+        assert_eq!(stored_after, mempool);
     }
 }

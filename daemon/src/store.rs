@@ -90,21 +90,32 @@ pub fn durable_write_bytes(path: &str, body: &[u8]) -> Result<(), String> {
     }
     drop(f);
 
-    match fs::rename(&tmp, path) {
-        Ok(()) => {}
-        Err(rename_err) => {
-            if path_ref.exists() {
-                if let Err(e) = fs::remove_file(path) {
+    #[cfg(unix)]
+    {
+        if let Err(rename_err) = fs::rename(&tmp, path) {
+            cleanup_tmp(&tmp);
+            return Err(format!("rename_failed: {}", rename_err));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        match fs::rename(&tmp, path) {
+            Ok(()) => {}
+            Err(rename_err) => {
+                if path_ref.exists() {
+                    if let Err(e) = fs::remove_file(path) {
+                        cleanup_tmp(&tmp);
+                        return Err(format!("replace_remove_failed: {}", e));
+                    }
+                    if let Err(e) = fs::rename(&tmp, path) {
+                        cleanup_tmp(&tmp);
+                        return Err(format!("rename_failed: {} (initial={})", e, rename_err));
+                    }
+                } else {
                     cleanup_tmp(&tmp);
-                    return Err(format!("replace_remove_failed: {}", e));
+                    return Err(format!("rename_failed: {}", rename_err));
                 }
-                if let Err(e) = fs::rename(&tmp, path) {
-                    cleanup_tmp(&tmp);
-                    return Err(format!("rename_failed: {} (initial={})", e, rename_err));
-                }
-            } else {
-                cleanup_tmp(&tmp);
-                return Err(format!("rename_failed: {}", rename_err));
             }
         }
     }
@@ -2767,6 +2778,20 @@ mod tests_a5 {
             "unexpected tmp leak: {:?}",
             entries
         );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_write_bytes_on_unix_does_not_attempt_remove_replace_fallback() {
+        let data_dir = temp_datadir("durable-write-unix-rename-only");
+        let path = format!("{}/peers.txt", data_dir);
+        std::fs::create_dir_all(&path).expect("create conflicting dir");
+
+        let err = durable_write_string(&path, "hello").unwrap_err();
+        assert!(err.contains("rename_failed"));
+        assert!(!err.contains("replace_remove_failed"));
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }
