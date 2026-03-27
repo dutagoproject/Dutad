@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
-const RELEASE_VERSION: &str = "1.0.2-v4.1-rc1";
+const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug)]
 #[command(

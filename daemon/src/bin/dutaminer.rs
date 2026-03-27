@@ -28,7 +28,7 @@ use duta_core::{dutahash, types::H32};
 use serde::Deserialize;
 use serde_json::json;
 
-const RELEASE_VERSION: &str = "1.0.2-v4.1-rc1";
+const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug)]
 #[command(

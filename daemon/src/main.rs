@@ -33,7 +33,7 @@ const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_CYAN: &str = "\x1b[36m";
 const ANSI_WHITE: &str = "\x1b[37m";
-const RELEASE_VERSION: &str = "1.0.2-v4.1-rc1";
+const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn console_tag(tag: &str, color: &str) -> String {
     format!("{}{}{: <8}{}", ANSI_BOLD, color, tag, ANSI_RESET)

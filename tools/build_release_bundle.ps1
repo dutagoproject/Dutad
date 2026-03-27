@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.2-v4.1-rc1",
+    [string]$Version = "1.0.3",
     [string]$OutputRoot = "dist",
     [switch]$SkipBuild,
     [string]$TargetTriple = "x86_64-pc-windows-msvc"
