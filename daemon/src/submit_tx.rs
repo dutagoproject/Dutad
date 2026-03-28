@@ -1090,12 +1090,16 @@ mod tests {
         db.flush().unwrap();
     }
 
-    fn signed_tx_for_test(prev_txid: &str, prev_vout: u64, input_value: u64) -> serde_json::Value {
+    fn signed_tx_for_network(
+        prev_txid: &str,
+        prev_vout: u64,
+        input_value: u64,
+        net: duta_core::netparams::Network,
+    ) -> serde_json::Value {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         let pub_hex = hex::encode(sk.verifying_key().to_bytes());
         let pkh = address::pkh_from_pubkey(&sk.verifying_key().to_bytes());
-        let dest =
-            address::pkh_to_address_for_network(duta_core::netparams::Network::Mainnet, &pkh);
+        let dest = address::pkh_to_address_for_network(net, &pkh);
         let mut tx = json!({
             "vin":[{"txid":prev_txid,"vout":prev_vout,"pubkey":pub_hex,"sig":""}],
             "vout":[{"address":dest,"value":input_value - super::required_relay_fee(256)}]
@@ -1104,6 +1108,15 @@ mod tests {
         let sig = sk.sign(&msg);
         tx["vin"][0]["sig"] = json!(hex::encode(sig.to_bytes()));
         tx
+    }
+
+    fn signed_tx_for_test(prev_txid: &str, prev_vout: u64, input_value: u64) -> serde_json::Value {
+        signed_tx_for_network(
+            prev_txid,
+            prev_vout,
+            input_value,
+            duta_core::netparams::Network::Mainnet,
+        )
     }
 
     #[test]
@@ -1194,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_mempool_value_keeps_fee_in_txid_identity() {
+    fn sanitize_mempool_value_ignores_fee_and_size_for_txid_identity() {
         let tx = json!({
             "vin":[{"txid":"a","vout":0}],
             "vout":[{"address":"dut1111111111111111111111111111111111111111","value":1}],
@@ -1212,6 +1225,106 @@ mod tests {
         });
 
         assert!(sanitize_mempool_value(&mp).is_none());
+    }
+
+    #[test]
+    fn txid_stays_identical_across_submit_mempool_template_and_accepted_block() {
+        let data_dir = temp_datadir("txid-e2e");
+        crate::store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let input_pkh = address::pkh_from_pubkey(&sk.verifying_key().to_bytes());
+        let input_addr =
+            address::pkh_to_address_for_network(duta_core::netparams::Network::Testnet, &input_pkh);
+        let input_value = 50_000u64;
+        let confirmed_tx = json!({
+            "vin":[{"txid":"ff".repeat(32),"vout":0}],
+            "vout":[{"address":input_addr,"value":input_value}]
+        });
+        let prev_txid = txid_from_value(&confirmed_tx).unwrap();
+        let merkle = crate::store::merkle32_from_txids(std::slice::from_ref(&prev_txid)).unwrap();
+        let chain = vec![json!({
+            "height": 1,
+            "hash32": "11".repeat(32),
+            "bits": duta_core::netparams::pow_start_bits(duta_core::Network::Testnet),
+            "chainwork": 1,
+            "timestamp": 1_700_000_000u64,
+            "prevhash32": duta_core::netparams::genesis_hash(duta_core::Network::Testnet),
+            "merkle32": merkle,
+            "nonce": 1u64,
+            "miner": "test1miner",
+            "txs": {
+                prev_txid.clone(): confirmed_tx
+            }
+        })];
+        std::fs::write(
+            format!("{}/chain.json", data_dir),
+            serde_json::to_string(&chain).unwrap(),
+        )
+        .unwrap();
+        crate::store::bootstrap(&data_dir).unwrap();
+
+        let tx = signed_tx_for_network(
+            &prev_txid,
+            0,
+            input_value,
+            duta_core::netparams::Network::Testnet,
+        );
+        let submit_txid = super::ingest_tx(&data_dir, None, &tx).expect("ingest tx");
+
+        let mp = load_mempool(&data_dir);
+        let stored_txid = mp["txids"][0].as_str().expect("stored txid");
+        assert_eq!(stored_txid, submit_txid);
+
+        let miner_pkh = address::pkh_from_pubkey(&SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes());
+        let miner_addr =
+            address::pkh_to_address_for_network(duta_core::netparams::Network::Testnet, &miner_pkh);
+        let work_scope = format!("{}#work", miner_addr);
+        let tpl =
+            crate::work::build_work_template(&data_dir, &miner_addr, false, &work_scope).unwrap();
+        let template_txids: Vec<String> = tpl["transactions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        assert!(template_txids.iter().any(|txid| txid == &submit_txid));
+
+        let template_txs = tpl["txs"].as_object().expect("template tx object");
+        assert!(template_txs.contains_key(&submit_txid));
+
+        let accepted_dir = temp_datadir("txid-e2e-accepted");
+        crate::store::ensure_datadir_meta(&accepted_dir, "testnet").unwrap();
+        let accepted_merkle =
+            crate::store::merkle32_from_txids(std::slice::from_ref(&submit_txid)).unwrap();
+        let accepted_chain = vec![json!({
+            "height": 1,
+            "hash32": "22".repeat(32),
+            "bits": duta_core::netparams::pow_start_bits(duta_core::Network::Testnet),
+            "chainwork": 1,
+            "timestamp": 1_700_000_100u64,
+            "prevhash32": duta_core::netparams::genesis_hash(duta_core::Network::Testnet),
+            "merkle32": accepted_merkle,
+            "nonce": 1u64,
+            "miner": miner_addr,
+            "txs": {
+                submit_txid.clone(): template_txs.get(&submit_txid).cloned().unwrap()
+            }
+        })];
+        std::fs::write(
+            format!("{}/chain.json", accepted_dir),
+            serde_json::to_string(&accepted_chain).unwrap(),
+        )
+        .unwrap();
+        crate::store::bootstrap(&accepted_dir).unwrap();
+        let accepted = crate::store::block_at(&accepted_dir, 1).expect("accepted block");
+        let accepted_txs = accepted
+            .txs
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .expect("accepted tx object");
+        assert!(accepted_txs.contains_key(&submit_txid));
     }
 
     #[test]

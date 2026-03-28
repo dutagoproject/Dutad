@@ -469,6 +469,7 @@ pub(crate) fn build_mined_block_from_work_nonce(
     consume: bool,
 ) -> Result<ChainBlock, String> {
     let item = crate::work::peek_work(work_id).ok_or_else(|| "stale_work".to_string())?;
+    let _work_snapshot_meta = (item.created_at, item.tx_count, item.fees_total);
 
     let anchor_hash = H32::from_hex(&item.anchor_hash32).unwrap_or_else(H32::zero);
     let dataset = get_dataset_cached(item.pow_version, item.epoch, anchor_hash, item.mem_mb);
@@ -838,6 +839,7 @@ mod tests {
         crate::work::insert_test_work(
             work_id,
             crate::work::WorkItem {
+                created_at: crate::now_ts(),
                 expires_at: crate::now_ts().saturating_add(60),
                 height: 1,
                 pow_version: duta_core::dutahash::POW_VERSION_V4,
@@ -848,6 +850,8 @@ mod tests {
                 chainwork: 1,
                 miner: "miner".to_string(),
                 work_scope: "miner".to_string(),
+                tx_count: 0,
+                fees_total: 0,
                 txs_obj: json!({}),
                 header,
                 anchor_hash32: H32::zero().to_hex(),
@@ -862,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_mined_block_mempool_keeps_fee_in_txid_identity() {
+    fn sanitize_mined_block_mempool_ignores_fee_and_size_for_txid_identity() {
         let tx = json!({
             "vin":[{"txid":"a","vout":0}],
             "vout":[{"address":"test1dest","value":1000}],
@@ -919,6 +923,7 @@ mod tests {
         crate::work::insert_test_work(
             work_id,
             crate::work::WorkItem {
+                created_at: crate::now_ts(),
                 expires_at: crate::now_ts().saturating_add(60),
                 height,
                 pow_version: duta_core::dutahash::POW_VERSION_V4,
@@ -929,6 +934,8 @@ mod tests {
                 chainwork: 1,
                 miner: "miner".to_string(),
                 work_scope: "miner".to_string(),
+                tx_count: 0,
+                fees_total: 0,
                 txs_obj: json!({}),
                 header,
                 anchor_hash32: anchor.to_hex(),

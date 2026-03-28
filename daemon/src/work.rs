@@ -15,6 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Debug)]
 pub(crate) struct WorkItem {
+    pub created_at: u64,
     pub expires_at: u64,
     pub height: u64,
     pub pow_version: u8,
@@ -25,6 +26,8 @@ pub(crate) struct WorkItem {
     pub chainwork: u64,
     pub miner: String,
     pub work_scope: String,
+    pub tx_count: u64,
+    pub fees_total: u64,
     pub txs_obj: serde_json::Value,
     pub header: [u8; 80],
     pub anchor_hash32: String,
@@ -167,6 +170,23 @@ enum TemplateFilterDecision {
     Pending,
 }
 
+fn log_template_filter_reject(
+    txid: &str,
+    reason: &str,
+    prev_txid: &str,
+    prev_vout: u64,
+    next_height: u64,
+) {
+    wlog!(
+        "[dutad] TEMPLATE_FILTER_DROP txid={} reason={} prev={}:{} next_height={}",
+        short_id(txid),
+        reason,
+        short_id(prev_txid),
+        prev_vout,
+        next_height
+    );
+}
+
 fn filter_template_mempool_with_lookup<F>(
     next_height: u64,
     mp: &serde_json::Value,
@@ -223,15 +243,30 @@ where
             let mut decision = TemplateFilterDecision::Keep;
             for input in &vin {
                 let Some(prev_txid) = input.get("txid").and_then(|v| v.as_str()) else {
+                    log_template_filter_reject(&txid, "prev_txid_missing", "-", 0, next_height);
                     decision = TemplateFilterDecision::Reject;
                     break;
                 };
                 let Some(prev_vout) = input.get("vout").and_then(|v| v.as_u64()) else {
+                    log_template_filter_reject(
+                        &txid,
+                        "prev_vout_missing",
+                        prev_txid,
+                        0,
+                        next_height,
+                    );
                     decision = TemplateFilterDecision::Reject;
                     break;
                 };
                 let outpoint = format!("{}:{}", prev_txid, prev_vout);
                 if consumed_outpoints.contains(&outpoint) {
+                    log_template_filter_reject(
+                        &txid,
+                        "outpoint_conflict",
+                        prev_txid,
+                        prev_vout,
+                        next_height,
+                    );
                     decision = TemplateFilterDecision::Reject;
                     break;
                 }
@@ -239,10 +274,24 @@ where
                     continue;
                 }
                 if rejected_ids.contains(prev_txid) {
+                    log_template_filter_reject(
+                        &txid,
+                        "parent_rejected",
+                        prev_txid,
+                        prev_vout,
+                        next_height,
+                    );
                     decision = TemplateFilterDecision::Reject;
                     break;
                 }
                 if txs_obj.contains_key(prev_txid) {
+                    wlog!(
+                        "[dutad] TEMPLATE_FILTER_PENDING txid={} reason=parent_missing_in_mempool_order prev={}:{} next_height={}",
+                        short_id(&txid),
+                        short_id(prev_txid),
+                        prev_vout,
+                        next_height
+                    );
                     decision = TemplateFilterDecision::Pending;
                     break;
                 }
@@ -252,11 +301,27 @@ where
                             && next_height
                                 < created_height.saturating_add(store::COINBASE_MATURITY)
                         {
+                            wlog!(
+                                "[dutad] TEMPLATE_FILTER_DROP txid={} reason=coinbase_immature prev={}:{} created_height={} maturity={} next_height={}",
+                                short_id(&txid),
+                                short_id(prev_txid),
+                                prev_vout,
+                                created_height,
+                                store::COINBASE_MATURITY,
+                                next_height
+                            );
                             decision = TemplateFilterDecision::Reject;
                             break;
                         }
                     }
                     None => {
+                        log_template_filter_reject(
+                            &txid,
+                            "utxo_missing",
+                            prev_txid,
+                            prev_vout,
+                            next_height,
+                        );
                         decision = TemplateFilterDecision::Reject;
                         break;
                     }
@@ -285,6 +350,15 @@ where
         }
 
         if next_pending.is_empty() || !progressed {
+            if !next_pending.is_empty() && !progressed {
+                for txid in &next_pending {
+                    wlog!(
+                        "[dutad] TEMPLATE_FILTER_DROP txid={} reason=parent_missing_unresolved next_height={}",
+                        short_id(txid),
+                        next_height
+                    );
+                }
+            }
             break;
         }
         pending_ids = next_pending;
@@ -306,11 +380,25 @@ fn filter_template_mempool(
     })
 }
 
+fn same_tip_scope(existing: &WorkItem, next: &WorkItem) -> bool {
+    existing.work_scope == next.work_scope
+        && existing.prevhash32 == next.prevhash32
+        && existing.height == next.height
+}
+
 fn short_id(id: &str) -> &str {
     if id.len() <= 8 {
         id
     } else {
         &id[..8]
+    }
+}
+
+fn short_scope(scope: &str) -> &str {
+    if scope.len() <= 24 {
+        scope
+    } else {
+        &scope[..24]
     }
 }
 
@@ -519,6 +607,7 @@ pub(crate) fn build_work_template(
     let work_id = hash32_from_bytes(&id_bytes);
 
     let item = WorkItem {
+        created_at,
         expires_at,
         height,
         pow_version,
@@ -529,6 +618,8 @@ pub(crate) fn build_work_template(
         chainwork,
         miner: miner.to_string(),
         work_scope: work_scope.to_string(),
+        tx_count: tx_count as u64,
+        fees_total,
         txs_obj: txs_obj.clone(),
         header,
         anchor_hash32: anchor_hash32.to_hex(),
@@ -538,7 +629,18 @@ pub(crate) fn build_work_template(
 
     {
         let mut map = work_map_lock();
+        let before_total = map.len();
         map.retain(|_, v| v.expires_at > created_at);
+        let after_expiry = map.len();
+        let same_tip_matches: Vec<(String, WorkItem)> = map
+            .iter()
+            .filter(|(_, v)| same_tip_scope(v, &item))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let same_tip_match_count = same_tip_matches.len();
+        map.retain(|_, v| !same_tip_scope(v, &item));
+        let after_same_tip = map.len();
+        let evicted_same_tip = after_expiry.saturating_sub(after_same_tip);
         if map.len() >= MAX_OUTSTANDING_WORK_TOTAL {
             return Err("busy".to_string());
         }
@@ -546,7 +648,35 @@ pub(crate) fn build_work_template(
         if per_scope >= MAX_OUTSTANDING_WORK_PER_MINER {
             return Err("too_many_outstanding_work".to_string());
         }
+        let evicted_ids: Vec<String> = same_tip_matches
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    short_id(k),
+                    v.height,
+                    short_id(&v.prevhash32),
+                    v.tx_count,
+                    v.fees_total
+                )
+            })
+            .collect();
         map.insert(work_id.clone(), item);
+        wlog!(
+            "[dutad] WORK_ISSUE work={} scope={} height={} prev={} tx_count={} fees_total={} before_total={} after_expiry={} same_tip_matches={} evicted_same_tip={} per_scope_after={} evicted_ids={:?}",
+            short_id(&work_id),
+            short_scope(work_scope),
+            height,
+            short_id(&prevhash32),
+            tx_count,
+            fees_total,
+            before_total,
+            after_expiry,
+            same_tip_match_count,
+            evicted_same_tip,
+            per_scope + 1,
+            evicted_ids
+        );
     }
 
     submit_work::prewarm_dataset(pow_version, epoch, anchor_hash32, mem_mb);
@@ -627,9 +757,17 @@ fn request_is_stratum_pool_work(request: &tiny_http::Request) -> bool {
 fn stratum_work_scope(miner: &str, worker: &str) -> String {
     let worker = worker.trim();
     if worker.is_empty() {
-        return miner.to_string();
+        return format!("{}#work", miner);
     }
-    format!("{}#{}", miner, worker)
+    format!("{}#{}#work", miner, worker)
+}
+
+fn daemon_work_scope(miner: &str) -> String {
+    format!("{}#work", miner)
+}
+
+pub(crate) fn gbt_work_scope(miner: &str) -> String {
+    format!("{}#gbt", miner)
 }
 
 fn request_work_scope(
@@ -647,7 +785,7 @@ fn request_work_scope(
             return stratum_work_scope(miner, worker);
         }
     }
-    miner.to_string()
+    daemon_work_scope(miner)
 }
 
 pub fn handle_work(
@@ -763,14 +901,62 @@ pub(crate) fn peek_work(work_id: &str) -> Option<WorkItem> {
     let mut map = work_map_lock();
     let now = now_ts();
     map.retain(|_, v| v.expires_at > now);
-    map.get(work_id).cloned()
+    let found = map.get(work_id).cloned();
+    match &found {
+        Some(item) => {
+            wlog!(
+                "[dutad] WORK_PEEK hit work={} scope={} height={} prev={} tx_count={} fees_total={} created_at={} expires_at={} map_size={}",
+                short_id(work_id),
+                short_scope(&item.work_scope),
+                item.height,
+                short_id(&item.prevhash32),
+                item.tx_count,
+                item.fees_total,
+                item.created_at,
+                item.expires_at,
+                map.len()
+            );
+        }
+        None => {
+            wlog!(
+                "[dutad] WORK_PEEK miss work={} map_size={}",
+                short_id(work_id),
+                map.len()
+            );
+        }
+    }
+    found
 }
 
 pub(crate) fn take_work(work_id: &str) -> Option<WorkItem> {
     let mut map = work_map_lock();
     let now = now_ts();
     map.retain(|_, v| v.expires_at > now);
-    map.remove(work_id)
+    let removed = map.remove(work_id);
+    match &removed {
+        Some(item) => {
+            wlog!(
+                "[dutad] WORK_TAKE hit work={} scope={} height={} prev={} tx_count={} fees_total={} created_at={} expires_at={} map_size_after={}",
+                short_id(work_id),
+                short_scope(&item.work_scope),
+                item.height,
+                short_id(&item.prevhash32),
+                item.tx_count,
+                item.fees_total,
+                item.created_at,
+                item.expires_at,
+                map.len()
+            );
+        }
+        None => {
+            wlog!(
+                "[dutad] WORK_TAKE miss work={} map_size_after={}",
+                short_id(work_id),
+                map.len()
+            );
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -784,7 +970,7 @@ mod tests {
     use super::{
         block_subsidy, filter_template_mempool_with_lookup, mining_address_is_valid,
         mining_address_is_valid_for_network, net_from_datadir, sanitize_mempool_value,
-        stratum_work_scope, template_tx_for_block,
+        same_tip_scope, stratum_work_scope, template_tx_for_block,
     };
     use crate::store;
     use duta_core::amount::DUT_PER_DUTA;
@@ -858,9 +1044,9 @@ mod tests {
     fn stratum_work_scope_uses_worker_identity() {
         assert_eq!(
             stratum_work_scope("dut1wallet", "rig-a"),
-            "dut1wallet#rig-a"
+            "dut1wallet#rig-a#work"
         );
-        assert_eq!(stratum_work_scope("dut1wallet", "   "), "dut1wallet");
+        assert_eq!(stratum_work_scope("dut1wallet", "   "), "dut1wallet#work");
     }
 
     #[test]
@@ -870,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_mempool_value_keeps_fee_in_txid_identity() {
+    fn sanitize_mempool_value_ignores_fee_and_size_for_txid_identity() {
         let tx = json!({
             "vin":[{"txid":"a","vout":0}],
             "vout":[{"address":"test1dest","value":1000}],
@@ -1019,5 +1205,215 @@ mod tests {
         let stored_after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&mempool_path).unwrap()).unwrap();
         assert_eq!(stored_after, mempool);
+    }
+
+    #[test]
+    fn same_tip_scope_matches_older_scope_snapshot() {
+        let older = super::WorkItem {
+            created_at: 100,
+            expires_at: 130,
+            height: 10,
+            pow_version: 4,
+            prevhash32: "11".repeat(32),
+            merkle32: "22".repeat(32),
+            timestamp: 100,
+            bits: 20,
+            chainwork: 123,
+            miner: "test1111111111111111111111111111111111111111".to_string(),
+            work_scope: "test1111111111111111111111111111111111111111".to_string(),
+            tx_count: 2,
+            fees_total: 100,
+            txs_obj: json!({}),
+            header: [0u8; 80],
+            anchor_hash32: "00".repeat(32),
+            epoch: 0,
+            mem_mb: 256,
+        };
+        let newer = super::WorkItem {
+            created_at: 101,
+            expires_at: 131,
+            height: 10,
+            pow_version: 4,
+            prevhash32: "11".repeat(32),
+            merkle32: "33".repeat(32),
+            timestamp: 101,
+            bits: 20,
+            chainwork: 123,
+            miner: "test1111111111111111111111111111111111111111".to_string(),
+            work_scope: "test1111111111111111111111111111111111111111".to_string(),
+            tx_count: 1,
+            fees_total: 1,
+            txs_obj: json!({}),
+            header: [0u8; 80],
+            anchor_hash32: "00".repeat(32),
+            epoch: 0,
+            mem_mb: 256,
+        };
+        assert!(same_tip_scope(&older, &newer));
+    }
+
+    #[test]
+    fn build_work_template_supersedes_older_same_tip_work_for_same_scope() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-work-supersede-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        store::bootstrap(&data_dir).unwrap();
+
+        let tx1 = json!({
+            "vin":[{"txid":"chain","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":1000}],
+            "fee": 10
+        });
+        let txid1 = crate::store::txid_from_value(&tx1).unwrap();
+        let mempool1 = json!({
+            "txids":[txid1.clone()],
+            "txs": { txid1.clone(): tx1 }
+        });
+        let mempool_path = format!("{}/mempool.json", data_dir);
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool1).unwrap()).unwrap();
+
+        let tpl1 = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let work1 = tpl1.get("work_id").and_then(|v| v.as_str()).unwrap().to_string();
+        assert!(super::peek_work(&work1).is_some());
+
+        let tx2 = json!({
+            "vin":[{"txid":"chain2","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":2000}],
+            "fee": 20
+        });
+        let txid2 = crate::store::txid_from_value(&tx2).unwrap();
+        let mempool2 = json!({
+            "txids":[txid1.clone(), txid2.clone()],
+            "txs": {
+                txid1.clone(): mempool1["txs"][txid1.clone()].clone(),
+                txid2.clone(): tx2
+            }
+        });
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool2).unwrap()).unwrap();
+
+        let tpl2 = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let work2 = tpl2.get("work_id").and_then(|v| v.as_str()).unwrap().to_string();
+        assert_ne!(work1, work2);
+        assert!(super::peek_work(&work2).is_some());
+        assert!(super::peek_work(&work1).is_none());
+    }
+
+    #[test]
+    fn build_work_template_replaces_same_tip_scope_even_without_more_txs() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-work-single-active-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        store::bootstrap(&data_dir).unwrap();
+
+        let tx = json!({
+            "vin":[{"txid":"chain","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":1000}],
+            "fee": 10
+        });
+        let txid = crate::store::txid_from_value(&tx).unwrap();
+        let mempool = json!({
+            "txids":[txid.clone()],
+            "txs": { txid.clone(): tx }
+        });
+        let mempool_path = format!("{}/mempool.json", data_dir);
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool).unwrap()).unwrap();
+
+        let tpl1 = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let work1 = tpl1.get("work_id").and_then(|v| v.as_str()).unwrap().to_string();
+        assert!(super::peek_work(&work1).is_some());
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let tpl2 = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let work2 = tpl2.get("work_id").and_then(|v| v.as_str()).unwrap().to_string();
+        assert_ne!(work1, work2);
+        assert!(super::peek_work(&work2).is_some());
+        assert!(super::peek_work(&work1).is_none());
+    }
+
+    #[test]
+    fn build_work_template_does_not_supersede_across_work_and_gbt_scopes() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-work-source-split-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        store::bootstrap(&data_dir).unwrap();
+
+        let tx = json!({
+            "vin":[{"txid":"chain","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":1000}],
+            "fee": 10
+        });
+        let txid = crate::store::txid_from_value(&tx).unwrap();
+        let mempool = json!({
+            "txids":[txid.clone()],
+            "txs": { txid.clone(): tx }
+        });
+        let mempool_path = format!("{}/mempool.json", data_dir);
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool).unwrap()).unwrap();
+
+        let miner = "test1111111111111111111111111111111111111111";
+        let work_tpl =
+            super::build_work_template(&data_dir, miner, false, &super::daemon_work_scope(miner))
+                .unwrap();
+        let work_work_id = work_tpl
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert!(super::peek_work(&work_work_id).is_some());
+
+        let gbt_tpl =
+            super::build_work_template(&data_dir, miner, false, &super::gbt_work_scope(miner))
+                .unwrap();
+        let gbt_work_id = gbt_tpl
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert_ne!(work_work_id, gbt_work_id);
+        assert!(super::peek_work(&work_work_id).is_some());
+        assert!(super::peek_work(&gbt_work_id).is_some());
     }
 }

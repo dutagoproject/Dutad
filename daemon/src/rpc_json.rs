@@ -448,7 +448,12 @@ fn getblocktemplate_json(
         return Err("invalid_miner_address".to_string());
     }
 
-    let work = crate::work::build_work_template(data_dir, miner, false, miner)?;
+    let work = crate::work::build_work_template(
+        data_dir,
+        miner,
+        false,
+        &crate::work::gbt_work_scope(miner),
+    )?;
     let bits_internal = work.get("bits").and_then(|x| x.as_u64()).unwrap_or(0);
     let bits_compact = compact_hex_from_leading_zero_bits(bits_internal);
     let target_hex = target_hex_from_leading_zero_bits(bits_internal);

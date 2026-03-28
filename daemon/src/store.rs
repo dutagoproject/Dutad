@@ -228,6 +228,7 @@ pub fn txid_from_value(v: &serde_json::Value) -> Result<String, String> {
     if let Some(obj) = tx.as_object_mut() {
         for key in [
             "size",
+            "fee",
             "txid",
             "hash",
             "hex",
@@ -3205,5 +3206,20 @@ mod tests_a5 {
             Some(H32([0xff; 32])),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn txid_from_value_ignores_fee_and_size_fields() {
+        let base = json!({
+            "vin":[{"txid":"aa","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":1234}]
+        });
+        let with_policy = json!({
+            "vin":[{"txid":"aa","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":1234}],
+            "fee": 1000,
+            "size": 321
+        });
+        assert_eq!(txid_from_value(&base).unwrap(), txid_from_value(&with_policy).unwrap());
     }
 }
