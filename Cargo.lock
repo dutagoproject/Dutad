@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "duta-core"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "hex",
  "serde_json",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "dutad"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "clap",
  "ctrlc",
