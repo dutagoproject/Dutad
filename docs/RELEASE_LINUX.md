@@ -2,7 +2,7 @@
 
 This guide is for packaging the `dutad` repo binaries on Linux.
 
-For the current public release line, package them as `1.0.3`.
+For the current public release line, package them as `1.0.4`.
 
 It covers:
 
@@ -41,19 +41,19 @@ From the repository root:
 
 ```bash
 chmod +x ./tools/build_release_bundle.sh
-./tools/build_release_bundle.sh 1.0.3
+./tools/build_release_bundle.sh 1.0.4
 ```
 
 The bundle will be created in:
 
 ```text
-dist/duta-release-1.0.3-linux-x86_64
+dist/duta-release-1.0.4-linux-x86_64
 ```
 
 A compressed archive will also be created:
 
 ```text
-dist/duta-release-1.0.3-linux-x86_64.tar.gz
+dist/duta-release-1.0.4-linux-x86_64.tar.gz
 ```
 
 ## Build for another Linux target
@@ -62,7 +62,7 @@ Example with musl:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
-./tools/build_release_bundle.sh 1.0.3 x86_64-unknown-linux-musl
+./tools/build_release_bundle.sh 1.0.4 x86_64-unknown-linux-musl
 ```
 
 ## Quick verification
@@ -70,9 +70,9 @@ rustup target add x86_64-unknown-linux-musl
 After the bundle is built, test the binaries directly:
 
 ```bash
-./dist/duta-release-1.0.3-linux-x86_64/dutad --help
-./dist/duta-release-1.0.3-linux-x86_64/duta-cli --help
-./dist/duta-release-1.0.3-linux-x86_64/dutaminer --help
+./dist/duta-release-1.0.4-linux-x86_64/dutad-1.0.4-linux-x86_64 --help
+./dist/duta-release-1.0.4-linux-x86_64/duta-cli-1.0.4-linux-x86_64 --help
+./dist/duta-release-1.0.4-linux-x86_64/dutaminer-1.0.4-linux-x86_64 --help
 ```
 
 ## Suggested release checklist
@@ -82,7 +82,7 @@ Before publishing a Linux release:
 - run `cargo test`
 - build the bundle
 - verify the main binaries start and print help output
-- check `sha256sums.txt` or the published `SHA256SUMS.txt` if you are assembling a release folder manually
+- check `sha256sums.txt` against the versioned filenames in the bundle
 - keep daemon admin RPC private by default in deployment docs
-- label the package version clearly as `1.0.3`
-- label the bundle version clearly as `1.0.3`
+- label the package version clearly as `1.0.4`
+- label the bundle version clearly as `1.0.4`

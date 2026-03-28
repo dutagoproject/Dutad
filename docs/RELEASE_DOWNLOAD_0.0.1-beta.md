@@ -3,7 +3,7 @@
 This document is kept only as an archive of the first public beta package notes.
 It is not the current release guidance for the repository.
 
-For the active release line, use the `1.0.3` packaging and install guides in this repo.
+For the active release line, use the `1.0.4` packaging and install guides in this repo.
 
 ## Highlights
 
@@ -53,6 +53,6 @@ If a checksum file is attached to the release, verify it before running the bina
 ## Archive note
 
 This beta package note is preserved for historical reference only.
-For current operator guidance, use the current `1.0.3` release and deployment documents in this repository.
+For current operator guidance, use the current `1.0.4` release and deployment documents in this repository.
 
 For build, deployment, and security notes, see the repository documentation.

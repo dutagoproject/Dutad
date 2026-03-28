@@ -4,14 +4,15 @@
 
 It contains the chain-critical parts of the project: consensus rules, block and transaction validation, storage, daemon RPC, P2P networking, and the built-in solo mining flow.
 
-Current release line: `1.0.3`
+Current release line: `1.0.4`
 
-Release `1.0.3` focus:
+Release `1.0.4` focus:
 
 - public peer handling is hardened so random inbound peers do not contaminate backbone outbound state
 - reorg candidates are validated before rollback, so bad public chains cannot drag a live node backward first
 - peer persistence is more durable and no longer leaves `peers.txt.tmp.*` garbage behind on failed writes
-- the release bundle is aligned around the `1.0.3` daemon, CLI, solo miner, and matching bootstrap snapshot
+- the release bundle is aligned around the `1.0.4` daemon, CLI, solo miner, and matching bootstrap snapshot
+- every published binary artifact now carries its release version in the filename, so operators can match files, checksums, and rollout notes without guesswork
 
 Website: https://dutago.xyz
 

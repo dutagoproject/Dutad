@@ -90,7 +90,7 @@ Look for:
 
 ## Operational caution
 
-This repository is on the `1.0.3` package line.
+This repository is on the `1.0.4` package line.
 
 That means:
 

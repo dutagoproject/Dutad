@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-1.0.3}"
+VERSION="${1:-1.0.4}"
 TARGET_TRIPLE="${2:-x86_64-unknown-linux-gnu}"
 OUTPUT_ROOT="${3:-dist}"
 
@@ -36,9 +36,9 @@ PACKAGES=(
 )
 
 ARTIFACTS=(
-  "dutad:dutad${EXE_SUFFIX}:bin"
-  "dutad:duta-cli${EXE_SUFFIX}:bin"
-  "dutad:dutaminer${EXE_SUFFIX}:bin"
+  "dutad:dutad${EXE_SUFFIX}:dutad-${VERSION}-${ARCH_LABEL}${EXE_SUFFIX}:bin"
+  "dutad:duta-cli${EXE_SUFFIX}:duta-cli-${VERSION}-${ARCH_LABEL}${EXE_SUFFIX}:bin"
+  "dutad:dutaminer${EXE_SUFFIX}:dutaminer-${VERSION}-${ARCH_LABEL}${EXE_SUFFIX}:bin"
 )
 
 for package in "${PACKAGES[@]}"; do
@@ -54,21 +54,21 @@ manifest_artifacts=()
 : > "${BUNDLE_DIR}/sha256sums.txt"
 
 for artifact in "${ARTIFACTS[@]}"; do
-  IFS=":" read -r package file kind <<< "$artifact"
+  IFS=":" read -r package file release_name kind <<< "$artifact"
   source_path="${RELEASE_DIR}/${file}"
   if [[ ! -f "$source_path" ]]; then
     echo "missing_release_artifact: ${file}" >&2
     exit 1
   fi
 
-  dest_path="${BUNDLE_DIR}/${file}"
+  dest_path="${BUNDLE_DIR}/${release_name}"
   cp "$source_path" "$dest_path"
   chmod +x "$dest_path" || true
 
   sha="$(sha256sum "$dest_path" | awk '{print $1}')"
   size="$(wc -c < "$dest_path" | tr -d ' ')"
-  printf '%s  %s\n' "$sha" "$file" >> "${BUNDLE_DIR}/sha256sums.txt"
-  manifest_artifacts+=("{\"package\":\"${package}\",\"file\":\"${file}\",\"kind\":\"${kind}\",\"sha256\":\"${sha}\",\"bytes\":${size}}")
+  printf '%s  %s\n' "$sha" "$release_name" >> "${BUNDLE_DIR}/sha256sums.txt"
+  manifest_artifacts+=("{\"package\":\"${package}\",\"source_file\":\"${file}\",\"file\":\"${release_name}\",\"kind\":\"${kind}\",\"sha256\":\"${sha}\",\"bytes\":${size}}")
 done
 
 generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"

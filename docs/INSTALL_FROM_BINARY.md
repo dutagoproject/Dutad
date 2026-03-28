@@ -17,7 +17,7 @@ For each release, download the bundle that matches your platform:
 
 Also keep:
 
-- `SHA256SUMS.txt`
+- `sha256sums.txt`
 - the release notes or operator guide that came with the bundle
 - `chain5644.zip` if you want to start from the published bootstrap snapshot
 
@@ -37,23 +37,23 @@ certutil -hashfile duta-cli.exe SHA256
 certutil -hashfile dutaminer.exe SHA256
 ```
 
-Compare the output to `SHA256SUMS.txt`.
+Compare the output to `sha256sums.txt`.
 
 ## Linux install example
 
 Extract the archive:
 
 ```bash
-tar -xzf duta-release-1.0.3-linux-x86_64.tar.gz
-cd duta-release-1.0.3-linux-x86_64
+tar -xzf duta-release-1.0.4-linux-x86_64.tar.gz
+cd duta-release-1.0.4-linux-x86_64
 ```
 
 Install the binaries:
 
 ```bash
-install -m 0755 dutad /usr/local/bin/dutad
-install -m 0755 duta-cli /usr/local/bin/duta-cli
-install -m 0755 dutaminer /usr/local/bin/dutaminer
+install -m 0755 dutad-1.0.4-linux-x86_64 /usr/local/bin/dutad
+install -m 0755 duta-cli-1.0.4-linux-x86_64 /usr/local/bin/duta-cli
+install -m 0755 dutaminer-1.0.4-linux-x86_64 /usr/local/bin/dutaminer
 ```
 
 Create the data directory:
@@ -78,9 +78,9 @@ C:\DUTA
 You can test the binaries directly:
 
 ```bat
-dutad.exe --help
-duta-cli.exe --help
-dutaminer.exe --help
+dutad-1.0.4-windows-x86_64.exe --help
+duta-cli-1.0.4-windows-x86_64.exe --help
+dutaminer-1.0.4-windows-x86_64.exe --help
 ```
 
 ## Suggested layout
@@ -97,9 +97,9 @@ Linux:
 Windows:
 
 ```text
-C:\DUTA\dutad.exe
-C:\DUTA\duta-cli.exe
-C:\DUTA\dutaminer.exe
+C:\DUTA\dutad-1.0.4-windows-x86_64.exe
+C:\DUTA\duta-cli-1.0.4-windows-x86_64.exe
+C:\DUTA\dutaminer-1.0.4-windows-x86_64.exe
 ```
 
 ## Important notes

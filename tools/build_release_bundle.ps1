@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.3",
+    [string]$Version = "1.0.4",
     [string]$OutputRoot = "dist",
     [switch]$SkipBuild,
     [string]$TargetTriple = "x86_64-pc-windows-msvc"
@@ -26,9 +26,9 @@ $bundleName = "duta-release-$Version-$archLabel"
 $bundleDir = Join-Path $workspaceRoot (Join-Path $OutputRoot $bundleName)
 
 $artifacts = @(
-    @{ package = "dutad"; target = "dutad.exe"; kind = "bin" },
-    @{ package = "dutad"; target = "duta-cli.exe"; kind = "bin" },
-    @{ package = "dutad"; target = "dutaminer.exe"; kind = "bin" }
+    @{ package = "dutad"; target = "dutad.exe"; release = "dutad-$Version-$archLabel.exe"; kind = "bin" },
+    @{ package = "dutad"; target = "duta-cli.exe"; release = "duta-cli-$Version-$archLabel.exe"; kind = "bin" },
+    @{ package = "dutad"; target = "dutaminer.exe"; release = "dutaminer-$Version-$archLabel.exe"; kind = "bin" }
 )
 
 $packages = $artifacts.package | Sort-Object -Unique
@@ -55,7 +55,7 @@ foreach ($artifact in $artifacts) {
         throw "missing_release_artifact: $($artifact.target)"
     }
 
-    $destPath = Join-Path $bundleDir $artifact.target
+    $destPath = Join-Path $bundleDir $artifact.release
     Copy-Item -Force $sourcePath $destPath
 
     $hash = (Get-FileHash -Algorithm SHA256 $destPath).Hash.ToLowerInvariant()
@@ -63,12 +63,13 @@ foreach ($artifact in $artifacts) {
 
     $manifestArtifacts += [pscustomobject]@{
         package = $artifact.package
-        file = $artifact.target
+        source_file = $artifact.target
+        file = $artifact.release
         kind = $artifact.kind
         sha256 = $hash
         bytes = $size
     }
-    $hashLines.Add("$hash  $($artifact.target)")
+    $hashLines.Add("$hash  $($artifact.release)")
 }
 
 $manifest = [ordered]@{
