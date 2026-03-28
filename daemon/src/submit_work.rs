@@ -158,6 +158,30 @@ fn submit_reason_message(reason: &str) -> String {
     }
 }
 
+fn ensure_submit_work_is_current(data_dir: &str, work_id: &str) -> Result<(), String> {
+    let item = crate::work::peek_work(work_id).ok_or_else(|| "stale_work".to_string())?;
+    let current_tpl =
+        crate::work::build_work_template(data_dir, &item.miner, false, &item.work_scope)?;
+    let current_work_id = current_tpl
+        .get("work_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "template_missing_work_id".to_string())?;
+    wlog!(
+        "[dutad] SUBMIT_FRESHNESS work={} current_work={} scope={} height={} prev={} tx_count={} current_tx_count={}",
+        short_id(work_id),
+        short_id(current_work_id),
+        item.work_scope,
+        item.height,
+        short_id(&item.prevhash32),
+        item.tx_count,
+        current_tpl.get("tx_count").and_then(|v| v.as_u64()).unwrap_or(0)
+    );
+    if current_work_id != work_id {
+        return Err("stale_work".to_string());
+    }
+    Ok(())
+}
+
 fn submit_reject_body(detail: &str) -> (u16, String) {
     let reason = canonical_submit_reason(detail);
     let user_detail = if reason == "sync_gate" {
@@ -602,7 +626,8 @@ pub fn handle_submit_work(
         short_id(work_id),
         request_received.elapsed().as_millis()
     );
-    let mined_block = match build_mined_block_from_work_nonce(work_id, nonce, true) {
+    let freshness = ensure_submit_work_is_current(data_dir, work_id);
+    let mined_block = match freshness.and_then(|_| build_mined_block_from_work_nonce(work_id, nonce, true)) {
         Ok(v) => v,
         Err(e) if e == "stale_work" => {
             let body = json!({
@@ -743,9 +768,9 @@ pub fn handle_submit_work(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_mined_block_from_work_nonce, canonical_submit_reason, parse_submit_payload,
-        sanitize_mempool_value, submit_cache_key, submit_http_status, submit_reason_message,
-        submit_reject_body, work_id_is_valid,
+        build_mined_block_from_work_nonce, canonical_submit_reason, ensure_submit_work_is_current,
+        parse_submit_payload, sanitize_mempool_value, submit_cache_key, submit_http_status,
+        submit_reason_message, submit_reject_body, work_id_is_valid,
     };
     use duta_core::types::H32;
     use serde_json::json;
@@ -947,5 +972,99 @@ mod tests {
         let block = build_mined_block_from_work_nonce(work_id, nonce, false).unwrap();
         assert_eq!(block.nonce, Some(nonce));
         assert_eq!(block.hash32, block.pow_digest32.clone().unwrap());
+    }
+
+    #[test]
+    fn submit_freshness_gate_rejects_same_tip_work_after_material_template_change() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-submit-freshness-gate-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        crate::store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        crate::store::bootstrap(&data_dir).unwrap();
+
+        let miner = "test1111111111111111111111111111111111111111";
+        let scope = format!("{}#work", miner);
+        let tx1 = json!({
+            "vin":[],
+            "vout":[{"address":miner,"value":1000}],
+            "fee": 10
+        });
+        let txid1 = crate::store::txid_from_value(&tx1).unwrap();
+        let mempool_path = format!("{}/mempool.json", data_dir);
+        let mempool1 = json!({
+            "txids":[txid1.clone()],
+            "txs": { txid1.clone(): tx1 }
+        });
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool1).unwrap()).unwrap();
+
+        let tpl1 = crate::work::build_work_template(&data_dir, miner, false, &scope).unwrap();
+        let work1 = tpl1
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let tx2 = json!({
+            "vin":[],
+            "vout":[{"address":miner,"value":2000}],
+            "fee": 20
+        });
+        let txid2 = crate::store::txid_from_value(&tx2).unwrap();
+        let mempool2 = json!({
+            "txids":[txid1.clone(), txid2.clone()],
+            "txs": {
+                txid1.clone(): mempool1["txs"][txid1.clone()].clone(),
+                txid2.clone(): tx2
+            }
+        });
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool2).unwrap()).unwrap();
+
+        let err = ensure_submit_work_is_current(&data_dir, &work1).unwrap_err();
+        assert_eq!(err, "stale_work");
+        assert!(crate::work::peek_work(&work1).is_none());
+    }
+
+    #[test]
+    fn submit_freshness_gate_keeps_same_tip_work_when_template_is_unchanged() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-submit-freshness-stable-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        crate::store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        crate::store::bootstrap(&data_dir).unwrap();
+
+        let miner = "test1111111111111111111111111111111111111111";
+        let scope = format!("{}#work", miner);
+        let tx = json!({
+            "vin":[],
+            "vout":[{"address":miner,"value":1000}],
+            "fee": 10
+        });
+        let txid = crate::store::txid_from_value(&tx).unwrap();
+        let mempool_path = format!("{}/mempool.json", data_dir);
+        let mempool = json!({
+            "txids":[txid.clone()],
+            "txs": { txid.clone(): tx }
+        });
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool).unwrap()).unwrap();
+
+        let tpl1 = crate::work::build_work_template(&data_dir, miner, false, &scope).unwrap();
+        let work1 = tpl1
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        ensure_submit_work_is_current(&data_dir, &work1).unwrap();
+        assert!(crate::work::peek_work(&work1).is_some());
     }
 }
