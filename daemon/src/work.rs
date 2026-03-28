@@ -187,6 +187,23 @@ fn log_template_filter_reject(
     );
 }
 
+fn log_template_filter_trace(
+    txid: &str,
+    reason: &str,
+    prev_txid: &str,
+    prev_vout: u64,
+    next_height: u64,
+) {
+    edlog!(
+        "[dutad] TEMPLATE_FILTER_TRACE txid={} reason={} prev={}:{} next_height={}",
+        short_id(txid),
+        reason,
+        short_id(prev_txid),
+        prev_vout,
+        next_height
+    );
+}
+
 fn filter_template_mempool_with_lookup<F>(
     next_height: u64,
     mp: &serde_json::Value,
@@ -229,6 +246,13 @@ where
             let Some(txv) = txs_obj.get(&txid) else {
                 continue;
             };
+            edlog!(
+                "[dutad] TEMPLATE_FILTER_CHECK txid={} next_height={} vin_count={} vout_count={}",
+                short_id(&txid),
+                next_height,
+                txv.get("vin").and_then(|v| v.as_array()).map(|v| v.len()).unwrap_or(0),
+                txv.get("vout").and_then(|v| v.as_array()).map(|v| v.len()).unwrap_or(0),
+            );
             let vin = txv
                 .get("vin")
                 .and_then(|v| v.as_array())
@@ -241,6 +265,7 @@ where
                 .unwrap_or_default();
 
             let mut decision = TemplateFilterDecision::Keep;
+            let mut pending_prev: Option<(String, u64, &'static str)> = None;
             for input in &vin {
                 let Some(prev_txid) = input.get("txid").and_then(|v| v.as_str()) else {
                     log_template_filter_reject(&txid, "prev_txid_missing", "-", 0, next_height);
@@ -271,6 +296,13 @@ where
                     break;
                 }
                 if produced_outpoints.contains(&outpoint) {
+                    log_template_filter_trace(
+                        &txid,
+                        "parent_created_in_same_template",
+                        prev_txid,
+                        prev_vout,
+                        next_height,
+                    );
                     continue;
                 }
                 if rejected_ids.contains(prev_txid) {
@@ -285,13 +317,14 @@ where
                     break;
                 }
                 if txs_obj.contains_key(prev_txid) {
-                    wlog!(
-                        "[dutad] TEMPLATE_FILTER_PENDING txid={} reason=parent_missing_in_mempool_order prev={}:{} next_height={}",
-                        short_id(&txid),
-                        short_id(prev_txid),
+                    log_template_filter_trace(
+                        &txid,
+                        "parent_missing_in_mempool_order",
+                        prev_txid,
                         prev_vout,
                         next_height
                     );
+                    pending_prev = Some((prev_txid.to_string(), prev_vout, "parent_missing_in_mempool_order"));
                     decision = TemplateFilterDecision::Pending;
                     break;
                 }
@@ -313,6 +346,13 @@ where
                             decision = TemplateFilterDecision::Reject;
                             break;
                         }
+                        log_template_filter_trace(
+                            &txid,
+                            "utxo_present",
+                            prev_txid,
+                            prev_vout,
+                            next_height,
+                        );
                     }
                     None => {
                         log_template_filter_reject(
@@ -338,11 +378,29 @@ where
                     for (idx, _output) in vout.iter().enumerate() {
                         produced_outpoints.insert(format!("{}:{}", txid, idx));
                     }
+                    edlog!(
+                        "[dutad] TEMPLATE_FILTER_KEEP txid={} next_height={} vin_count={} vout_count={}",
+                        short_id(&txid),
+                        next_height,
+                        vin.len(),
+                        vout.len(),
+                    );
                     kept_ids.push(txid.clone());
                     kept_txs.insert(txid, txv.clone());
                     progressed = true;
                 }
-                TemplateFilterDecision::Pending => next_pending.push(txid),
+                TemplateFilterDecision::Pending => {
+                    if let Some((prev_txid, prev_vout, reason)) = pending_prev.as_ref() {
+                        log_template_filter_trace(
+                            &txid,
+                            reason,
+                            prev_txid,
+                            *prev_vout,
+                            next_height,
+                        );
+                    }
+                    next_pending.push(txid)
+                }
                 TemplateFilterDecision::Reject => {
                     rejected_ids.insert(txid);
                 }
@@ -352,8 +410,8 @@ where
         if next_pending.is_empty() || !progressed {
             if !next_pending.is_empty() && !progressed {
                 for txid in &next_pending {
-                    wlog!(
-                        "[dutad] TEMPLATE_FILTER_DROP txid={} reason=parent_missing_unresolved next_height={}",
+                    edlog!(
+                        "[dutad] TEMPLATE_FILTER_DROP txid={} reason=parent_missing_unresolved prev=-:0 next_height={}",
                         short_id(txid),
                         next_height
                     );
@@ -384,6 +442,10 @@ fn same_tip_scope(existing: &WorkItem, next: &WorkItem) -> bool {
     existing.work_scope == next.work_scope
         && existing.prevhash32 == next.prevhash32
         && existing.height == next.height
+}
+
+fn materially_changed_template(existing: &WorkItem, next: &WorkItem) -> bool {
+    existing.tx_count != next.tx_count || existing.merkle32 != next.merkle32
 }
 
 fn short_id(id: &str) -> &str {
@@ -630,25 +692,84 @@ pub(crate) fn build_work_template(
     {
         let mut map = work_map_lock();
         let before_total = map.len();
-        map.retain(|_, v| v.expires_at > created_at);
-        let after_expiry = map.len();
         let same_tip_matches: Vec<(String, WorkItem)> = map
             .iter()
             .filter(|(_, v)| same_tip_scope(v, &item))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let same_tip_match_count = same_tip_matches.len();
-        map.retain(|_, v| !same_tip_scope(v, &item));
-        let after_same_tip = map.len();
-        let evicted_same_tip = after_expiry.saturating_sub(after_same_tip);
-        if map.len() >= MAX_OUTSTANDING_WORK_TOTAL {
-            return Err("busy".to_string());
+        if let Some((existing_work_id, existing_item)) = same_tip_matches.iter().max_by_key(|(_, v)| v.created_at) {
+            if !materially_changed_template(existing_item, &item) {
+                if let Some(existing_mut) = map.get_mut(existing_work_id) {
+                    existing_mut.expires_at = expires_at;
+                }
+                let refreshed = map
+                    .get(existing_work_id)
+                    .cloned()
+                    .unwrap_or_else(|| existing_item.clone());
+                wlog!(
+                    "[dutad] WORK_REUSE work={} scope={} height={} prev={} ts={} tx_count={} fees_total={} reuse_from={} old_expires_at={} new_expires_at={} reason=same_tip_no_material_change",
+                    short_id(existing_work_id),
+                    short_scope(work_scope),
+                    refreshed.height,
+                    short_id(&refreshed.prevhash32),
+                    refreshed.timestamp,
+                    refreshed.tx_count,
+                    refreshed.fees_total,
+                    short_id(existing_work_id),
+                    existing_item.expires_at,
+                    refreshed.expires_at
+                );
+                return Ok(json!({
+                    "work_id": existing_work_id,
+                    "workid": existing_work_id,
+                    "expires_at": refreshed.expires_at,
+                    "height": refreshed.height,
+                    "pow_version": refreshed.pow_version,
+                    "prevhash32": refreshed.prevhash32,
+                    "merkle32": refreshed.merkle32,
+                    "merkleroot": refreshed.merkle32,
+                    "previousblockhash": refreshed.prevhash32,
+                    "timestamp": refreshed.timestamp,
+                    "curtime": refreshed.timestamp,
+                    "mintime": refreshed.timestamp,
+                    "bits": refreshed.bits,
+                    "bits_compact": compact_hex_from_leading_zero_bits(refreshed.bits),
+                    "target": target_hex_from_leading_zero_bits(refreshed.bits),
+                    "anchor_h": anchor_h,
+                    "anchor_hash32": refreshed.anchor_hash32,
+                    "epoch": refreshed.epoch,
+                    "mem_mb": refreshed.mem_mb,
+                    "tx_count": refreshed.tx_count,
+                    "coinbasevalue": reward_total,
+                    "coinbase_txid": coinbase_txid,
+                    "coinbasetxn": coinbase_tx,
+                    "transactions": txids,
+                    "txs": txs_obj,
+                    "header80": hex::encode(refreshed.header),
+                    "duta": {
+                        "algorithm": netparams::pow_algorithm_name(net, height),
+                        "pow_version": refreshed.pow_version,
+                        "difficulty_bits": refreshed.bits,
+                        "template_address": miner,
+                        "work_expires_at": refreshed.expires_at,
+                        "anchor_height": anchor_h,
+                        "anchor_hash32": refreshed.anchor_hash32,
+                        "epoch": refreshed.epoch,
+                        "mem_mb": refreshed.mem_mb,
+                        "header80": hex::encode(refreshed.header)
+                    }
+                }));
+            }
         }
-        let per_scope = map.values().filter(|v| v.work_scope == work_scope).count();
-        if per_scope >= MAX_OUTSTANDING_WORK_PER_MINER {
-            return Err("too_many_outstanding_work".to_string());
-        }
-        let evicted_ids: Vec<String> = same_tip_matches
+        map.retain(|_, v| v.expires_at > created_at);
+        let after_expiry = map.len();
+        let evicted_matches: Vec<(String, WorkItem)> = same_tip_matches
+            .into_iter()
+            .filter(|(_, v)| materially_changed_template(v, &item))
+            .collect();
+        let evicted_same_tip = evicted_matches.len();
+        let evicted_ids: Vec<String> = evicted_matches
             .iter()
             .map(|(k, v)| {
                 format!(
@@ -661,13 +782,40 @@ pub(crate) fn build_work_template(
                 )
             })
             .collect();
+        if evicted_same_tip > 0 {
+            for (old_work_id, old_item) in &evicted_matches {
+                wlog!(
+                    "[dutad] WORK_SUPERSEDE old_work={} new_work={} scope={} height={} prev={} old_ts={} new_ts={} old_tx_count={} new_tx_count={} old_fees_total={} new_fees_total={} reason=same_tip_scope_material_change",
+                    short_id(old_work_id),
+                    short_id(&work_id),
+                    short_scope(work_scope),
+                    height,
+                    short_id(&prevhash32),
+                    old_item.timestamp,
+                    ts,
+                    old_item.tx_count,
+                    tx_count,
+                    old_item.fees_total,
+                    fees_total
+                );
+            }
+        }
+        map.retain(|k, _| !evicted_matches.iter().any(|(old_k, _)| old_k == k));
+        if map.len() >= MAX_OUTSTANDING_WORK_TOTAL {
+            return Err("busy".to_string());
+        }
+        let per_scope = map.values().filter(|v| v.work_scope == work_scope).count();
+        if per_scope >= MAX_OUTSTANDING_WORK_PER_MINER {
+            return Err("too_many_outstanding_work".to_string());
+        }
         map.insert(work_id.clone(), item);
         wlog!(
-            "[dutad] WORK_ISSUE work={} scope={} height={} prev={} tx_count={} fees_total={} before_total={} after_expiry={} same_tip_matches={} evicted_same_tip={} per_scope_after={} evicted_ids={:?}",
+            "[dutad] WORK_ISSUE work={} scope={} height={} prev={} ts={} tx_count={} fees_total={} before_total={} after_expiry={} same_tip_matches={} evicted_same_tip={} per_scope_after={} evicted_ids={:?}",
             short_id(&work_id),
             short_scope(work_scope),
             height,
             short_id(&prevhash32),
+            ts,
             tx_count,
             fees_total,
             before_total,
@@ -970,7 +1118,7 @@ mod tests {
     use super::{
         block_subsidy, filter_template_mempool_with_lookup, mining_address_is_valid,
         mining_address_is_valid_for_network, net_from_datadir, sanitize_mempool_value,
-        same_tip_scope, stratum_work_scope, template_tx_for_block,
+        same_tip_scope, stratum_work_scope, template_tx_for_block, materially_changed_template,
     };
     use crate::store;
     use duta_core::amount::DUT_PER_DUTA;
@@ -1250,6 +1398,7 @@ mod tests {
             mem_mb: 256,
         };
         assert!(same_tip_scope(&older, &newer));
+        assert!(materially_changed_template(&older, &newer));
     }
 
     #[test]
@@ -1266,7 +1415,7 @@ mod tests {
         store::bootstrap(&data_dir).unwrap();
 
         let tx1 = json!({
-            "vin":[{"txid":"chain","vout":0}],
+            "vin":[],
             "vout":[{"address":"test1111111111111111111111111111111111111111","value":1000}],
             "fee": 10
         });
@@ -1289,7 +1438,7 @@ mod tests {
         assert!(super::peek_work(&work1).is_some());
 
         let tx2 = json!({
-            "vin":[{"txid":"chain2","vout":0}],
+            "vin":[],
             "vout":[{"address":"test1111111111111111111111111111111111111111","value":2000}],
             "fee": 20
         });
@@ -1317,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn build_work_template_replaces_same_tip_scope_even_without_more_txs() {
+    fn build_work_template_reuses_same_tip_scope_without_material_change() {
         let mut p = std::env::temp_dir();
         let uniq = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1362,9 +1511,69 @@ mod tests {
         )
         .unwrap();
         let work2 = tpl2.get("work_id").and_then(|v| v.as_str()).unwrap().to_string();
-        assert_ne!(work1, work2);
+        assert_eq!(work1, work2);
         assert!(super::peek_work(&work2).is_some());
-        assert!(super::peek_work(&work1).is_none());
+        assert!(super::peek_work(&work1).is_some());
+    }
+
+    #[test]
+    fn build_work_template_reuses_and_refreshes_expired_same_tip_scope_without_material_change() {
+        let mut p = std::env::temp_dir();
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        p.push(format!("duta-work-reuse-expired-{}", uniq));
+        std::fs::create_dir_all(&p).unwrap();
+        let data_dir = p.to_string_lossy().to_string();
+        store::ensure_datadir_meta(&data_dir, "testnet").unwrap();
+        store::bootstrap(&data_dir).unwrap();
+
+        let tx = json!({
+            "vin":[{"txid":"chain","vout":0}],
+            "vout":[{"address":"test1111111111111111111111111111111111111111","value":1000}],
+            "fee": 10
+        });
+        let txid = crate::store::txid_from_value(&tx).unwrap();
+        let mempool = json!({
+            "txids":[txid.clone()],
+            "txs": { txid.clone(): tx }
+        });
+        let mempool_path = format!("{}/mempool.json", data_dir);
+        std::fs::write(&mempool_path, serde_json::to_vec(&mempool).unwrap()).unwrap();
+
+        let tpl1 = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let work1 = tpl1.get("work_id").and_then(|v| v.as_str()).unwrap().to_string();
+        let expires1 = tpl1.get("expires_at").and_then(|v| v.as_u64()).unwrap();
+
+        let forced_expired = {
+            let mut map = super::work_map_lock();
+            let item = map.get_mut(&work1).unwrap();
+            let forced_expired = item.created_at.saturating_sub(1);
+            item.expires_at = forced_expired;
+            forced_expired
+        };
+
+        let tpl2 = super::build_work_template(
+            &data_dir,
+            "test1111111111111111111111111111111111111111",
+            false,
+            "test1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let work2 = tpl2.get("work_id").and_then(|v| v.as_str()).unwrap().to_string();
+        let expires2 = tpl2.get("expires_at").and_then(|v| v.as_u64()).unwrap();
+
+        assert_eq!(work1, work2);
+        assert!(expires2 > forced_expired);
+        assert!(expires2 >= expires1);
+        assert!(super::peek_work(&work1).is_some());
     }
 
     #[test]
